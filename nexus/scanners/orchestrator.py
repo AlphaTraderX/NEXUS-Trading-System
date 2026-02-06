@@ -12,10 +12,11 @@ from scanners.calendar import TurnOfMonthScanner, MonthEndScanner
 from scanners.vwap import VWAPScanner
 from scanners.rsi import RSIScanner
 from scanners.gap import GapScanner
-from scanners.session import PowerHourScanner, LondonOpenScanner, NYOpenScanner, SessionScanner
+from scanners.session import PowerHourScanner, LondonOpenScanner, NYOpenScanner, AsianRangeScanner, SessionScanner
 from scanners.orb import ORBScanner
 from scanners.bollinger import BollingerScanner
 from scanners.insider import InsiderScanner
+from scanners.earnings import EarningsDriftScanner
 from core.models import Opportunity
 from data.base import BaseDataProvider
 
@@ -71,6 +72,7 @@ class ScannerOrchestrator:
             PowerHourScanner(self.data_provider),
             LondonOpenScanner(self.data_provider),
             NYOpenScanner(self.data_provider),
+            AsianRangeScanner(self.data_provider),
             SessionScanner(self.data_provider),
 
             # Breakout scanners
@@ -78,6 +80,7 @@ class ScannerOrchestrator:
 
             # Fundamental scanners
             InsiderScanner(self.data_provider, insider_data_provider=self.insider_provider),
+            EarningsDriftScanner(self.data_provider),
         ]
 
         logger.info(f"Initialized {len(scanners)} scanners")
