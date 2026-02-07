@@ -116,18 +116,23 @@ class NexusScheduler:
         # Get current market status
         status = MarketHours.get_market_status()
         
-        # Log market status periodically
-        if self.scan_count % 10 == 0:  # Every 10 scans
+        # Log scan start
+        self._log(f"--- Scan #{self.scan_count} ---")
+        
+        # Log market status on first scan, then every 10 scans
+        if self.scan_count == 1 or self.scan_count % 10 == 0:
             self._log_market_status(status)
         
         # Run orchestrator if any market is open
         any_market_open = any(status["markets"].values())
         
         if not any_market_open:
-            if self.scan_count % 30 == 0:  # Every 30 scans when closed
-                next_open = MarketHours.get_next_market_open()
-                self._log(f"All markets closed. {next_open['message']}")
+            self._log("Markets closed - skipping scanners")
             return opportunities
+        
+        # Log which markets are being scanned
+        open_markets = [m for m, is_open in status["markets"].items() if is_open]
+        self._log(f"Scanning: {', '.join(open_markets)}")
         
         # Run the scan
         try:
@@ -139,6 +144,12 @@ class NexusScheduler:
                 
         except Exception as e:
             self._log(f"Scan cycle error: {e}", level="error")
+        
+        # Log scan completion
+        if opportunities:
+            self._log(f"Found {len(opportunities)} opportunities!")
+        else:
+            self._log("No opportunities this cycle")
         
         return opportunities
     
