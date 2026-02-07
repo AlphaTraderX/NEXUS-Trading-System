@@ -26,8 +26,8 @@ try:
 except ImportError:
     HTTPX_AVAILABLE = False
 
-from core.enums import Direction, EdgeType
-from core.models import NexusSignal
+from nexus.core.enums import Direction, EdgeType
+from nexus.core.models import NexusSignal
 
 
 @dataclass
@@ -432,10 +432,10 @@ class DiscordDelivery:
 
 # Test the Discord delivery (preview mode - doesn't actually send)
 if __name__ == "__main__":
-    from core.models import NexusSignal
-    from intelligence.cost_engine import CostBreakdown
-    from intelligence.scorer import SignalTier
-    from core.enums import Market, SignalStatus
+    from nexus.core.models import NexusSignal
+    from nexus.intelligence.cost_engine import CostBreakdown
+    from nexus.intelligence.scorer import SignalTier
+    from nexus.core.enums import Market, SignalStatus
 
     print("=" * 60)
     print("NEXUS DISCORD DELIVERY TEST")

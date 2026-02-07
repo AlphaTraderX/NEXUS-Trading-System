@@ -1,8 +1,8 @@
 import asyncio
 import logging
 import pandas as pd
-from scanners.bollinger import BollingerScanner
-from core.enums import Market
+from nexus.scanners.bollinger import BollingerScanner
+from nexus.core.enums import Market
 
 logging.basicConfig(level=logging.INFO)
 

@@ -15,8 +15,8 @@ from typing import Any, Callable, Dict, List, Optional
 import httpx
 import pandas as pd
 
-from config.settings import settings
-from data.base import BaseDataProvider, Quote
+from nexus.config.settings import settings
+from .base import BaseDataProvider, Quote
 
 logger = logging.getLogger(__name__)
 

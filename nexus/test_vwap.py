@@ -9,7 +9,7 @@ import pandas as pd
 # Add project root so imports work when run from nexus/
 sys.path.insert(0, str(Path(__file__).parent))
 
-from scanners.vwap import VWAPScanner
+from nexus.scanners.vwap import VWAPScanner
 
 
 # Create mock data provider

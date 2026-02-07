@@ -12,9 +12,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 import pandas as pd
 
-from core.enums import Direction, EdgeType, Market
-from core.models import Opportunity
-from intelligence.regime import MarketRegime
+from nexus.core.enums import Direction, EdgeType, Market
+from nexus.core.models import Opportunity
+from nexus.intelligence.regime import MarketRegime
 
 
 class BaseScanner(ABC):

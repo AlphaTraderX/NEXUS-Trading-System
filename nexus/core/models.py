@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, Field
 
-from core.enums import Direction, EdgeType, Market, SignalStatus
+from .enums import Direction, EdgeType, Market, SignalStatus
 
 
 class Opportunity(BaseModel):

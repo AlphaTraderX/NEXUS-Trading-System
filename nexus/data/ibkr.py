@@ -18,8 +18,8 @@ import pandas as pd
 from ib_insync import IB, Contract, Stock, Forex, Future, Order as IBOrder
 from ib_insync import MarketOrder, LimitOrder, StopOrder
 
-from config.settings import settings
-from data.base import (
+from nexus.config.settings import settings
+from .base import (
     BaseBroker,
     Quote,
     AccountInfo,

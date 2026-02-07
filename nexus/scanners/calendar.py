@@ -13,9 +13,9 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 import pytz
 
-from core.enums import Direction, EdgeType, Market
-from core.models import Opportunity
-from scanners.base import BaseScanner
+from .base import BaseScanner
+from nexus.core.enums import Direction, EdgeType, Market
+from nexus.core.models import Opportunity
 
 
 class TurnOfMonthScanner(BaseScanner):

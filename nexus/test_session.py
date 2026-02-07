@@ -3,8 +3,8 @@ import logging
 import pandas as pd
 from datetime import datetime, time
 import pytz
-from scanners.session import PowerHourScanner, LondonOpenScanner, NYOpenScanner, SessionScanner
-from core.enums import Market
+from nexus.scanners.session import PowerHourScanner, LondonOpenScanner, NYOpenScanner, SessionScanner
+from nexus.core.enums import Market
 
 logging.basicConfig(level=logging.INFO)
 

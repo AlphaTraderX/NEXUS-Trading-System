@@ -1,8 +1,8 @@
 import asyncio
 import logging
 import pandas as pd
-from scanners.rsi import RSIScanner
-from core.enums import Market
+from nexus.scanners.rsi import RSIScanner
+from nexus.core.enums import Market
 
 logging.basicConfig(level=logging.INFO)
 

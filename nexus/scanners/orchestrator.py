@@ -5,20 +5,20 @@ Runs each scanner, deduplicates by (symbol, direction), returns combined opportu
 
 import logging
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
-from scanners.base import BaseScanner
-from scanners.calendar import TurnOfMonthScanner, MonthEndScanner
-from scanners.vwap import VWAPScanner
-from scanners.rsi import RSIScanner
-from scanners.gap import GapScanner
-from scanners.session import PowerHourScanner, LondonOpenScanner, NYOpenScanner, AsianRangeScanner, SessionScanner
-from scanners.orb import ORBScanner
-from scanners.bollinger import BollingerScanner
-from scanners.insider import InsiderScanner
-from scanners.earnings import EarningsDriftScanner
-from core.models import Opportunity
-from data.base import BaseDataProvider
+from .base import BaseScanner
+from .calendar import TurnOfMonthScanner, MonthEndScanner
+from .vwap import VWAPScanner
+from .rsi import RSIScanner
+from .gap import GapScanner
+from .session import PowerHourScanner, LondonOpenScanner, NYOpenScanner, AsianRangeScanner, SessionScanner
+from .orb import ORBScanner
+from .bollinger import BollingerScanner
+from .insider import InsiderScanner
+from .earnings import EarningsDriftScanner
+from nexus.core.models import Opportunity
+from nexus.data.base import BaseDataProvider
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +36,23 @@ class ScannerOrchestrator:
 
     def __init__(
         self,
-        data_provider: BaseDataProvider,
+        data_provider: Optional[BaseDataProvider] = None,
+        stock_provider: Optional[BaseDataProvider] = None,
+        forex_provider: Optional[BaseDataProvider] = None,
         insider_provider: Optional[Any] = None,  # For insider scanner
         config: Optional[Dict] = None
     ):
-        self.data_provider = data_provider
+        # Support both legacy (data_provider) and scheduler (stock_provider/forex_provider)
+        if stock_provider is not None and forex_provider is not None:
+            self.stock_provider = stock_provider
+            self.forex_provider = forex_provider
+            self.data_provider = stock_provider  # Scanners use data_provider for now
+        elif data_provider is not None:
+            self.stock_provider = data_provider
+            self.forex_provider = data_provider
+            self.data_provider = data_provider
+        else:
+            raise ValueError("Provide either data_provider or (stock_provider and forex_provider)")
         self.insider_provider = insider_provider
         self.config = config or {}
 
@@ -102,7 +114,7 @@ class ScannerOrchestrator:
 
             try:
                 # Check if scanner is active
-                if not scanner.is_active():
+                if not scanner.is_active(datetime.now(timezone.utc)):
                     logger.debug(f"{scanner_name}: Not active, skipping")
                     continue
 
@@ -130,6 +142,13 @@ class ScannerOrchestrator:
         )
 
         return deduplicated
+
+    async def run_scan_cycle(self) -> List[Opportunity]:
+        """
+        Run one complete scan cycle (alias for run_all_scanners).
+        Used by NexusScheduler.
+        """
+        return await self.run_all_scanners()
 
     async def run_scanner(self, scanner_name: str) -> List[Opportunity]:
         """Run a specific scanner by name."""
@@ -197,7 +216,7 @@ class ScannerOrchestrator:
             name = scanner.__class__.__name__
             status["scanners"][name] = {
                 "edge_type": scanner.edge_type.value if scanner.edge_type else None,
-                "active": scanner.is_active(),
+                "active": scanner.is_active(datetime.now(timezone.utc)),
                 "stats": self.scanner_stats.get(name, {})
             }
 
@@ -205,8 +224,9 @@ class ScannerOrchestrator:
 
     def get_active_scanners(self) -> List[str]:
         """Get list of currently active scanner names."""
+        now = datetime.now(timezone.utc)
         return [
             s.__class__.__name__
             for s in self.scanners
-            if s.is_active()
+            if s.is_active(now)
         ]

@@ -25,20 +25,20 @@ async def test_all_scanners():
     results = []
 
     # Import all scanners
-    from scanners.calendar import TurnOfMonthScanner, MonthEndScanner
-    from scanners.vwap import VWAPScanner
-    from scanners.rsi import RSIScanner
-    from scanners.gap import GapScanner
-    from scanners.orb import ORBScanner
-    from scanners.bollinger import BollingerScanner
-    from scanners.session import (
+    from nexus.scanners.calendar import TurnOfMonthScanner, MonthEndScanner
+    from nexus.scanners.vwap import VWAPScanner
+    from nexus.scanners.rsi import RSIScanner
+    from nexus.scanners.gap import GapScanner
+    from nexus.scanners.orb import ORBScanner
+    from nexus.scanners.bollinger import BollingerScanner
+    from nexus.scanners.session import (
         PowerHourScanner,
         LondonOpenScanner,
         NYOpenScanner,
         AsianRangeScanner,
     )
-    from scanners.insider import InsiderScanner
-    from scanners.earnings import EarningsDriftScanner
+    from nexus.scanners.insider import InsiderScanner
+    from nexus.scanners.earnings import EarningsDriftScanner
 
     scanners = [
         ("Turn of Month", TurnOfMonthScanner()),

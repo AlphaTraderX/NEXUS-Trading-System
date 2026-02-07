@@ -3,9 +3,9 @@ from datetime import datetime
 from typing import List, Optional
 import pandas as pd
 
-from scanners.base import BaseScanner
-from core.enums import EdgeType, Market, Direction
-from core.models import Opportunity
+from .base import BaseScanner
+from nexus.core.enums import EdgeType, Market, Direction
+from nexus.core.models import Opportunity
 
 logger = logging.getLogger(__name__)
 

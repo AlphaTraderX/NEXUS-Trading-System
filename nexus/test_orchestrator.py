@@ -2,8 +2,8 @@ import asyncio
 import logging
 import pandas as pd
 from datetime import datetime
-from scanners.orchestrator import ScannerOrchestrator
-from scanners.insider import MockInsiderProvider, InsiderCluster, InsiderTransaction
+from nexus.scanners.orchestrator import ScannerOrchestrator
+from nexus.scanners.insider import MockInsiderProvider, InsiderCluster, InsiderTransaction
 
 logging.basicConfig(level=logging.INFO)
 

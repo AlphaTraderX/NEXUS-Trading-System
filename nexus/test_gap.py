@@ -1,8 +1,8 @@
 import asyncio
 import logging
 import pandas as pd
-from scanners.gap import GapScanner
-from core.enums import Market
+from nexus.scanners.gap import GapScanner
+from nexus.core.enums import Market
 
 logging.basicConfig(level=logging.INFO)
 

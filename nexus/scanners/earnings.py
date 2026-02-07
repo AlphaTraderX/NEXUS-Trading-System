@@ -10,9 +10,9 @@ from typing import List, Dict, Any, Optional
 
 import pandas as pd
 
-from scanners.base import BaseScanner
-from core.enums import EdgeType, Market, Direction
-from core.models import Opportunity
+from .base import BaseScanner
+from nexus.core.enums import EdgeType, Market, Direction
+from nexus.core.models import Opportunity
 
 
 class EarningsDriftScanner(BaseScanner):

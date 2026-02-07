@@ -4,8 +4,8 @@ import pandas as pd
 from datetime import datetime, timedelta
 from typing import List
 
-from scanners.insider import InsiderScanner, InsiderCluster, InsiderTransaction, MockInsiderProvider
-from core.enums import Market
+from nexus.scanners.insider import InsiderScanner, InsiderCluster, InsiderTransaction, MockInsiderProvider
+from nexus.core.enums import Market
 
 logging.basicConfig(level=logging.INFO)
 

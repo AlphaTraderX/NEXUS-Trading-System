@@ -21,14 +21,14 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.enums import Market, Direction, EdgeType, SignalStatus
-from core.models import Opportunity, NexusSignal
-from intelligence.cost_engine import CostEngine
-from intelligence.scorer import OpportunityScorer, ScoredOpportunity, SignalTier, MarketRegime
-from intelligence.trend_filter import TrendAlignment
-from risk.position_sizer import DynamicPositionSizer, RiskMode
-from risk.heat_manager import DynamicHeatManager, HeatAnalysis
-from risk.circuit_breaker import SmartCircuitBreaker, BreakerState
+from nexus.core.enums import Market, Direction, EdgeType, SignalStatus
+from nexus.core.models import Opportunity, NexusSignal
+from nexus.intelligence.cost_engine import CostEngine
+from nexus.intelligence.scorer import OpportunityScorer, ScoredOpportunity, SignalTier, MarketRegime
+from nexus.intelligence.trend_filter import TrendAlignment
+from nexus.risk.position_sizer import DynamicPositionSizer, RiskMode
+from nexus.risk.heat_manager import DynamicHeatManager, HeatAnalysis
+from nexus.risk.circuit_breaker import SmartCircuitBreaker, BreakerState
 
 
 @dataclass

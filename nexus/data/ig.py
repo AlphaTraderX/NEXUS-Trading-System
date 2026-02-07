@@ -16,8 +16,8 @@ from typing import Any, Callable, Dict, List, Optional
 import httpx
 import pandas as pd
 
-from config.settings import settings
-from data.base import (
+from nexus.config.settings import settings
+from .base import (
     BaseBroker,
     Quote,
     AccountInfo,

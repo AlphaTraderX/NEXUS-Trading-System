@@ -29,8 +29,8 @@ except ImportError:
     GROQ_AVAILABLE = False
     Groq = None
 
-from core.enums import Direction, EdgeType
-from intelligence.regime import MarketRegime
+from nexus.core.enums import Direction, EdgeType
+from .regime import MarketRegime
 
 
 @dataclass

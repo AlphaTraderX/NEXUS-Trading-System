@@ -1,129 +1,186 @@
 """
-NEXUS OANDA Provider
+NEXUS OANDA Data Provider
 
-Forex specialist broker with excellent API and tight spreads.
-Uses REST API v20 for all operations.
+Connects to OANDA v20 REST API for forex market data and execution.
+Supports both practice (demo) and live accounts.
 
-Markets: Forex (majors, minors, exotics)
+API Docs: https://developer.oanda.com/rest-live-v20/introduction/
 """
 
 import asyncio
 import logging
-from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
 
 import httpx
 import pandas as pd
 
-from config.settings import settings
-from data.base import (
+from .base import (
     BaseBroker,
     Quote,
     AccountInfo,
     Position,
     Order,
     OrderResult,
-    OrderType,
-    OrderStatus,
+    normalize_timeframe,
 )
 
 logger = logging.getLogger(__name__)
 
+UTC = timezone.utc
+
 
 class OANDAProvider(BaseBroker):
     """
-    OANDA forex broker provider.
+    OANDA v20 API provider for forex trading.
     
-    Features:
-    - Forex majors, minors, exotics
-    - Tight spreads on majors
-    - Excellent REST API (v20)
-    - Streaming prices available
+    Provides:
+    - Real-time forex quotes
+    - Historical OHLCV bars
+    - Account management
+    - Order execution
+    
+    Supports both practice (demo) and live environments.
     """
     
-    # API URLs
-    LIVE_URL = "https://api-fxtrade.oanda.com/v3"
-    PRACTICE_URL = "https://api-fxpractice.oanda.com/v3"
-    STREAM_LIVE = "https://stream-fxtrade.oanda.com/v3"
-    STREAM_PRACTICE = "https://stream-fxpractice.oanda.com/v3"
+    # API endpoints
+    PRACTICE_REST = "https://api-fxpractice.oanda.com"
+    PRACTICE_STREAM = "https://stream-fxpractice.oanda.com"
+    LIVE_REST = "https://api-fxtrade.oanda.com"
+    LIVE_STREAM = "https://stream-fxtrade.oanda.com"
     
-    def __init__(self):
+    # Timeframe mapping to OANDA granularity
+    GRANULARITY_MAP = {
+        "1m": "M1",
+        "5m": "M5",
+        "15m": "M15",
+        "30m": "M30",
+        "1h": "H1",
+        "4h": "H4",
+        "1D": "D",
+        "1W": "W",
+        "1M": "M",
+    }
+    
+    # Common forex pairs
+    FOREX_PAIRS = [
+        "EUR_USD", "GBP_USD", "USD_JPY", "USD_CHF",
+        "AUD_USD", "USD_CAD", "NZD_USD",
+        "EUR_GBP", "EUR_JPY", "GBP_JPY",
+    ]
+    
+    def __init__(
+        self,
+        api_key: str,
+        account_id: str,
+        practice: bool = True
+    ):
+        """
+        Initialize OANDA provider.
+        
+        Args:
+            api_key: OANDA API token
+            account_id: OANDA account ID (e.g., "101-004-12345678-001")
+            practice: Use practice/demo environment (default True)
+        """
         super().__init__()
-        self._account_id = settings.oanda_account_id
-        self._api_key = settings.oanda_api_key
-        self._practice = settings.oanda_practice
+        self.api_key = api_key
+        self.account_id = account_id
+        self.practice = practice
         
-        self._base_url = self.PRACTICE_URL if self._practice else self.LIVE_URL
-        self._stream_url = self.STREAM_PRACTICE if self._practice else self.STREAM_LIVE
+        # Set URLs based on environment
+        self.rest_url = self.PRACTICE_REST if practice else self.LIVE_REST
+        self.stream_url = self.PRACTICE_STREAM if practice else self.LIVE_STREAM
         
-        self._client = httpx.AsyncClient(timeout=30.0)
-        self._subscriptions: Dict[str, Callable] = {}
-    
-    def _auth_headers(self) -> Dict[str, str]:
-        """Get authentication headers."""
-        return {
-            "Authorization": f"Bearer {self._api_key}",
+        self.client: Optional[httpx.AsyncClient] = None
+        self._headers = {
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "Accept-Datetime-Format": "RFC3339",
         }
     
-    # =========================================================================
-    # CONNECTION
-    # =========================================================================
-    
     async def connect(self) -> bool:
-        """Connect to OANDA."""
+        """Initialize HTTP client and verify connection."""
         try:
-            # Test connection by getting account
-            response = await self._client.get(
-                f"{self._base_url}/accounts/{self._account_id}",
-                headers=self._auth_headers(),
+            self.client = httpx.AsyncClient(
+                timeout=30.0,
+                headers=self._headers
             )
             
-            if response.status_code != 200:
-                logger.error(f"OANDA auth failed: {response.status_code} - {response.text}")
+            # Test connection by fetching account
+            account = await self.get_account()
+            
+            if account:
+                self._connected = True
+                logger.info(f"Connected to OANDA {'Practice' if self.practice else 'Live'} - Account: {self.account_id}")
+                logger.info(f"Balance: {account.currency} {account.balance:,.2f}")
+                return True
+            else:
+                logger.error("Failed to fetch OANDA account")
                 return False
-            
-            self._connected = True
-            logger.info(f"Connected to OANDA (account: {self._account_id}, practice: {self._practice})")
-            return True
-            
+                
         except Exception as e:
-            logger.error(f"OANDA connection failed: {e}")
+            logger.error(f"Failed to connect to OANDA: {e}")
             return False
     
     async def disconnect(self) -> None:
-        """Disconnect from OANDA."""
+        """Close HTTP client."""
+        if self.client:
+            await self.client.aclose()
+            self.client = None
         self._connected = False
-        self._subscriptions.clear()
         logger.info("Disconnected from OANDA")
     
-    # =========================================================================
-    # MARKET DATA
-    # =========================================================================
+    async def _request(
+        self,
+        method: str,
+        endpoint: str,
+        params: Dict = None,
+        json_data: Dict = None
+    ) -> Dict:
+        """Make API request."""
+        if not self.client:
+            raise RuntimeError("Not connected. Call connect() first.")
+        
+        url = f"{self.rest_url}{endpoint}"
+        
+        try:
+            response = await self.client.request(
+                method,
+                url,
+                params=params,
+                json=json_data
+            )
+            response.raise_for_status()
+            return response.json()
+            
+        except httpx.HTTPStatusError as e:
+            logger.error(f"OANDA API error: {e.response.status_code} - {e.response.text}")
+            raise
+    
+    # ==================== Data Methods ====================
     
     async def get_quote(self, symbol: str) -> Quote:
-        """Get current quote for symbol."""
-        instrument = self.convert_symbol(symbol)
+        """
+        Get current quote for a forex pair.
         
-        response = await self._client.get(
-            f"{self._base_url}/accounts/{self._account_id}/pricing",
-            headers=self._auth_headers(),
-            params={"instruments": instrument},
-        )
+        Args:
+            symbol: Forex pair (e.g., "EUR/USD" or "EUR_USD")
+        """
+        instrument = self._normalize_symbol(symbol)
         
-        if response.status_code != 200:
-            raise Exception(f"Failed to get quote: {response.text}")
+        endpoint = f"/v3/accounts/{self.account_id}/pricing"
+        params = {"instruments": instrument}
         
-        data = response.json()
+        data = await self._request("GET", endpoint, params=params)
+        
         prices = data.get("prices", [])
-        
         if not prices:
-            raise Exception(f"No price data for {symbol}")
+            raise ValueError(f"No pricing data for {symbol}")
         
         price = prices[0]
         
-        # OANDA returns arrays of bids/asks
+        # Get bid/ask from price buckets
         bids = price.get("bids", [{}])
         asks = price.get("asks", [{}])
         
@@ -134,9 +191,9 @@ class OANDAProvider(BaseBroker):
             symbol=symbol,
             bid=bid,
             ask=ask,
-            last=(bid + ask) / 2,  # OANDA doesn't provide last
-            volume=0,  # Forex doesn't have traditional volume
-            timestamp=datetime.now(),
+            last=(bid + ask) / 2,  # Mid price as "last"
+            volume=0,  # Forex doesn't have volume in the same way
+            timestamp=datetime.fromisoformat(price.get("time", "").replace("Z", "+00:00"))
         )
     
     async def get_bars(
@@ -144,369 +201,252 @@ class OANDAProvider(BaseBroker):
         symbol: str,
         timeframe: str,
         limit: int = 100,
-        end_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
     ) -> pd.DataFrame:
-        """Get OHLCV bars."""
-        instrument = self.convert_symbol(symbol)
-        granularity = self._convert_timeframe(timeframe)
+        """
+        Get historical OHLCV bars for a forex pair.
+        
+        Args:
+            symbol: Forex pair (e.g., "EUR/USD" or "EUR_USD")
+            timeframe: Bar timeframe (1m, 5m, 15m, 1h, 4h, 1D)
+            limit: Number of bars to fetch (max 5000)
+            end_date: End date for bars (default: now)
+        """
+        instrument = self._normalize_symbol(symbol)
+        tf = normalize_timeframe(timeframe)
+        
+        if tf not in self.GRANULARITY_MAP:
+            raise ValueError(f"Unsupported timeframe: {timeframe}")
+        
+        granularity = self.GRANULARITY_MAP[tf]
+        
+        endpoint = f"/v3/instruments/{instrument}/candles"
         
         params = {
             "granularity": granularity,
-            "count": limit,
+            "count": min(limit, 5000),
             "price": "MBA",  # Mid, Bid, Ask
         }
         
         if end_date:
-            params["to"] = end_date.isoformat() + "Z"
+            params["to"] = end_date.isoformat()
         
-        response = await self._client.get(
-            f"{self._base_url}/instruments/{instrument}/candles",
-            headers=self._auth_headers(),
-            params=params,
-        )
+        data = await self._request("GET", endpoint, params=params)
         
-        if response.status_code != 200:
-            return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        
-        data = response.json()
         candles = data.get("candles", [])
         
         if not candles:
-            return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            logger.warning(f"No candle data for {symbol} {timeframe}")
+            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
         
-        # Use mid prices
-        df = pd.DataFrame([{
-            'timestamp': c.get("time"),
-            'open': float(c.get("mid", {}).get("o", 0)),
-            'high': float(c.get("mid", {}).get("h", 0)),
-            'low': float(c.get("mid", {}).get("l", 0)),
-            'close': float(c.get("mid", {}).get("c", 0)),
-            'volume': int(c.get("volume", 0)),
-        } for c in candles if c.get("complete", True)])
+        # Parse candles into DataFrame
+        rows = []
+        for candle in candles:
+            if not candle.get("complete", True):
+                continue  # Skip incomplete candles
+            
+            mid = candle.get("mid", {})
+            
+            rows.append({
+                "timestamp": datetime.fromisoformat(candle["time"].replace("Z", "+00:00")),
+                "open": float(mid.get("o", 0)),
+                "high": float(mid.get("h", 0)),
+                "low": float(mid.get("l", 0)),
+                "close": float(mid.get("c", 0)),
+                "volume": int(candle.get("volume", 0)),
+            })
+        
+        df = pd.DataFrame(rows)
+        
+        if df.empty:
+            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+        
+        df = df.sort_values("timestamp").tail(limit).reset_index(drop=True)
         
         return df
     
-    async def subscribe(
-        self,
-        symbols: List[str],
-        callback: Callable[[Quote], None],
-    ) -> bool:
-        """Subscribe to real-time quotes."""
-        for symbol in symbols:
-            self._subscriptions[symbol] = callback
-        
-        # Note: Full implementation would use streaming endpoint
-        logger.info(f"Subscribed to {len(symbols)} symbols (polling mode)")
-        return True
-    
-    async def unsubscribe(self, symbols: List[str]) -> None:
-        """Unsubscribe from symbols."""
-        for symbol in symbols:
-            self._subscriptions.pop(symbol, None)
-    
-    # =========================================================================
-    # ACCOUNT
-    # =========================================================================
+    # ==================== Account Methods ====================
     
     async def get_account(self) -> AccountInfo:
         """Get account information."""
-        response = await self._client.get(
-            f"{self._base_url}/accounts/{self._account_id}/summary",
-            headers=self._auth_headers(),
-        )
+        endpoint = f"/v3/accounts/{self.account_id}"
         
-        if response.status_code != 200:
-            raise Exception(f"Failed to get account: {response.text}")
-        
-        data = response.json()
+        data = await self._request("GET", endpoint)
         account = data.get("account", {})
         
         return AccountInfo(
-            account_id=self._account_id,
             balance=float(account.get("balance", 0)),
             equity=float(account.get("NAV", 0)),
             margin_used=float(account.get("marginUsed", 0)),
             margin_available=float(account.get("marginAvailable", 0)),
             currency=account.get("currency", "USD"),
             unrealized_pnl=float(account.get("unrealizedPL", 0)),
-            realized_pnl_today=float(account.get("pl", 0)),
         )
     
     async def get_positions(self) -> List[Position]:
         """Get all open positions."""
-        response = await self._client.get(
-            f"{self._base_url}/accounts/{self._account_id}/openPositions",
-            headers=self._auth_headers(),
-        )
+        endpoint = f"/v3/accounts/{self.account_id}/openPositions"
         
-        if response.status_code != 200:
-            return []
+        data = await self._request("GET", endpoint)
+        positions = data.get("positions", [])
         
-        data = response.json()
-        positions = []
-        
-        for pos in data.get("positions", []):
+        result = []
+        for pos in positions:
             instrument = pos.get("instrument", "")
             
             # OANDA separates long and short
-            long_data = pos.get("long", {})
-            short_data = pos.get("short", {})
+            long_units = int(pos.get("long", {}).get("units", 0))
+            short_units = int(pos.get("short", {}).get("units", 0))
             
-            if float(long_data.get("units", 0)) != 0:
-                units = float(long_data.get("units", 0))
-                avg_price = float(long_data.get("averagePrice", 0))
-                unrealized = float(long_data.get("unrealizedPL", 0))
-                
-                positions.append(Position(
-                    symbol=self.convert_symbol_from_broker(instrument),
+            if long_units > 0:
+                long_data = pos.get("long", {})
+                result.append(Position(
+                    symbol=self._denormalize_symbol(instrument),
                     direction="long",
-                    size=abs(units),
-                    entry_price=avg_price,
-                    current_price=avg_price,  # Would need separate quote
-                    unrealized_pnl=unrealized,
-                    unrealized_pnl_pct=(unrealized / (abs(units) * avg_price)) * 100 if avg_price > 0 else 0,
-                    market_value=abs(units) * avg_price,
+                    size=float(long_units),
+                    entry_price=float(long_data.get("averagePrice", 0)),
+                    current_price=0,  # Would need separate quote call
+                    unrealized_pnl=float(long_data.get("unrealizedPL", 0)),
+                    unrealized_pnl_pct=0,  # Calculate if needed
+                    margin_used=float(long_data.get("marginUsed", 0)),
                 ))
             
-            if float(short_data.get("units", 0)) != 0:
-                units = float(short_data.get("units", 0))
-                avg_price = float(short_data.get("averagePrice", 0))
-                unrealized = float(short_data.get("unrealizedPL", 0))
-                
-                positions.append(Position(
-                    symbol=self.convert_symbol_from_broker(instrument),
+            if short_units < 0:
+                short_data = pos.get("short", {})
+                result.append(Position(
+                    symbol=self._denormalize_symbol(instrument),
                     direction="short",
-                    size=abs(units),
-                    entry_price=avg_price,
-                    current_price=avg_price,
-                    unrealized_pnl=unrealized,
-                    unrealized_pnl_pct=(unrealized / (abs(units) * avg_price)) * 100 if avg_price > 0 else 0,
-                    market_value=abs(units) * avg_price,
+                    size=float(abs(short_units)),
+                    entry_price=float(short_data.get("averagePrice", 0)),
+                    current_price=0,
+                    unrealized_pnl=float(short_data.get("unrealizedPL", 0)),
+                    unrealized_pnl_pct=0,
+                    margin_used=float(short_data.get("marginUsed", 0)),
                 ))
         
-        return positions
+        return result
     
-    async def get_position(self, symbol: str) -> Optional[Position]:
-        """Get position for specific symbol."""
-        positions = await self.get_positions()
-        for pos in positions:
-            if pos.symbol == symbol:
-                return pos
-        return None
-    
-    # =========================================================================
-    # ORDERS
-    # =========================================================================
+    # ==================== Order Methods ====================
     
     async def place_order(self, order: Order) -> OrderResult:
-        """Place an order."""
-        instrument = self.convert_symbol(order.symbol)
+        """
+        Place an order.
         
-        # OANDA uses negative units for sell
+        Supports market, limit, and stop orders.
+        """
+        instrument = self._normalize_symbol(order.symbol)
+        
+        # Determine units (positive for long, negative for short)
         units = order.size if order.direction == "long" else -order.size
         
-        # Build order payload
-        order_spec: Dict[str, Any] = {
-            "instrument": instrument,
-            "units": str(int(units)),  # OANDA wants string
-            "type": "MARKET" if order.order_type == OrderType.MARKET else "LIMIT",
-            "positionFill": "DEFAULT",
+        endpoint = f"/v3/accounts/{self.account_id}/orders"
+        
+        order_data = {
+            "order": {
+                "instrument": instrument,
+                "units": str(int(units)),
+                "type": order.order_type.upper(),
+                "timeInForce": order.time_in_force,
+            }
         }
         
-        if order.order_type == OrderType.LIMIT and order.limit_price:
-            order_spec["price"] = str(order.limit_price)
+        # Add price for limit/stop orders
+        if order.order_type.lower() == "limit" and order.limit_price:
+            order_data["order"]["price"] = str(order.limit_price)
+        elif order.order_type.lower() == "stop" and order.stop_price:
+            order_data["order"]["price"] = str(order.stop_price)
         
+        # Add stop loss
         if order.stop_loss:
-            order_spec["stopLossOnFill"] = {
-                "price": str(order.stop_loss),
+            order_data["order"]["stopLossOnFill"] = {
+                "price": str(order.stop_loss)
             }
         
+        # Add take profit
         if order.take_profit:
-            order_spec["takeProfitOnFill"] = {
-                "price": str(order.take_profit),
+            order_data["order"]["takeProfitOnFill"] = {
+                "price": str(order.take_profit)
             }
         
-        response = await self._client.post(
-            f"{self._base_url}/accounts/{self._account_id}/orders",
-            headers=self._auth_headers(),
-            json={"order": order_spec},
-        )
-        
-        if response.status_code not in [200, 201]:
+        try:
+            data = await self._request("POST", endpoint, json_data=order_data)
+            
+            # Check for fill
+            if "orderFillTransaction" in data:
+                fill = data["orderFillTransaction"]
+                return OrderResult(
+                    order_id=fill.get("id", ""),
+                    status="filled",
+                    fill_price=float(fill.get("price", 0)),
+                    fill_time=datetime.fromisoformat(fill.get("time", "").replace("Z", "+00:00")),
+                    filled_size=float(abs(int(fill.get("units", 0)))),
+                    message="Order filled"
+                )
+            
+            # Check for pending order
+            if "orderCreateTransaction" in data:
+                created = data["orderCreateTransaction"]
+                return OrderResult(
+                    order_id=created.get("id", ""),
+                    status="pending",
+                    message="Order created"
+                )
+            
             return OrderResult(
                 order_id="",
-                status=OrderStatus.REJECTED,
-                symbol=order.symbol,
-                direction=order.direction,
-                requested_size=order.size,
-                message=response.text,
+                status="rejected",
+                message=str(data)
             )
-        
-        data = response.json()
-        
-        # Check if filled immediately (market order)
-        if "orderFillTransaction" in data:
-            fill = data["orderFillTransaction"]
+            
+        except Exception as e:
             return OrderResult(
-                order_id=fill.get("id", ""),
-                status=OrderStatus.FILLED,
-                symbol=order.symbol,
-                direction=order.direction,
-                requested_size=order.size,
-                filled_size=abs(float(fill.get("units", 0))),
-                fill_price=float(fill.get("price", 0)),
-                fill_time=datetime.now(),
-                commission=float(fill.get("commission", 0)),
-                message="Filled",
+                order_id="",
+                status="rejected",
+                message=str(e)
             )
-        
-        # Pending order
-        if "orderCreateTransaction" in data:
-            create = data["orderCreateTransaction"]
-            return OrderResult(
-                order_id=create.get("id", ""),
-                status=OrderStatus.SUBMITTED,
-                symbol=order.symbol,
-                direction=order.direction,
-                requested_size=order.size,
-                message="Order submitted",
-            )
-        
-        return OrderResult(
-            order_id="",
-            status=OrderStatus.REJECTED,
-            symbol=order.symbol,
-            direction=order.direction,
-            requested_size=order.size,
-            message="Unknown response",
-        )
     
     async def cancel_order(self, order_id: str) -> bool:
-        """Cancel an order."""
-        response = await self._client.put(
-            f"{self._base_url}/accounts/{self._account_id}/orders/{order_id}/cancel",
-            headers=self._auth_headers(),
-        )
-        return response.status_code == 200
+        """Cancel a pending order."""
+        endpoint = f"/v3/accounts/{self.account_id}/orders/{order_id}/cancel"
+        
+        try:
+            await self._request("PUT", endpoint)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to cancel order {order_id}: {e}")
+            return False
     
-    async def get_order(self, order_id: str) -> Optional[OrderResult]:
-        """Get order status."""
-        response = await self._client.get(
-            f"{self._base_url}/accounts/{self._account_id}/orders/{order_id}",
-            headers=self._auth_headers(),
-        )
+    async def close_position(self, symbol: str, size: Optional[float] = None) -> OrderResult:
+        """Close a position (full or partial)."""
+        instrument = self._normalize_symbol(symbol)
         
-        if response.status_code != 200:
-            return None
+        endpoint = f"/v3/accounts/{self.account_id}/positions/{instrument}/close"
         
-        data = response.json()
-        order = data.get("order", {})
+        # Determine what to close
+        if size:
+            # Partial close - need to determine direction
+            data = {"longUnits": str(int(size))}  # Assumes long, adjust as needed
+        else:
+            # Full close
+            data = {"longUnits": "ALL", "shortUnits": "ALL"}
         
-        return OrderResult(
-            order_id=order_id,
-            status=self._convert_order_status(order.get("state", "")),
-            symbol=self.convert_symbol_from_broker(order.get("instrument", "")),
-            direction="long" if float(order.get("units", 0)) > 0 else "short",
-            requested_size=abs(float(order.get("units", 0))),
-            filled_size=abs(float(order.get("filledUnits", 0))),
-        )
-    
-    async def get_open_orders(self) -> List[OrderResult]:
-        """Get all open orders."""
-        response = await self._client.get(
-            f"{self._base_url}/accounts/{self._account_id}/pendingOrders",
-            headers=self._auth_headers(),
-        )
-        
-        if response.status_code != 200:
-            return []
-        
-        data = response.json()
-        orders = []
-        
-        for order in data.get("orders", []):
-            units = float(order.get("units", 0))
-            orders.append(OrderResult(
-                order_id=order.get("id", ""),
-                status=OrderStatus.PENDING,
-                symbol=self.convert_symbol_from_broker(order.get("instrument", "")),
-                direction="long" if units > 0 else "short",
-                requested_size=abs(units),
-            ))
-        
-        return orders
-    
-    # =========================================================================
-    # POSITION MANAGEMENT
-    # =========================================================================
-    
-    async def close_position(
-        self,
-        symbol: str,
-        size: Optional[float] = None,
-    ) -> OrderResult:
-        """Close a position."""
-        instrument = self.convert_symbol(symbol)
-        
-        # Determine which side to close
-        position = await self.get_position(symbol)
-        if not position:
+        try:
+            response = await self._request("PUT", endpoint, json_data=data)
+            
+            return OrderResult(
+                order_id=response.get("relatedTransactionIDs", [""])[0],
+                status="filled",
+                message="Position closed"
+            )
+        except Exception as e:
             return OrderResult(
                 order_id="",
-                status=OrderStatus.REJECTED,
-                symbol=symbol,
-                direction="close",
-                requested_size=0,
-                message="No position found",
+                status="rejected",
+                message=str(e)
             )
-        
-        close_units = size or position.size
-        
-        if position.direction == "long":
-            payload = {"longUnits": "ALL" if size is None else str(int(close_units))}
-        else:
-            payload = {"shortUnits": "ALL" if size is None else str(int(close_units))}
-        
-        response = await self._client.put(
-            f"{self._base_url}/accounts/{self._account_id}/positions/{instrument}/close",
-            headers=self._auth_headers(),
-            json=payload,
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            
-            # Get the close transaction
-            if "longOrderFillTransaction" in data:
-                fill = data["longOrderFillTransaction"]
-            elif "shortOrderFillTransaction" in data:
-                fill = data["shortOrderFillTransaction"]
-            else:
-                fill = {}
-            
-            return OrderResult(
-                order_id=fill.get("id", ""),
-                status=OrderStatus.FILLED,
-                symbol=symbol,
-                direction="close",
-                requested_size=close_units,
-                filled_size=abs(float(fill.get("units", close_units))),
-                fill_price=float(fill.get("price", 0)),
-                fill_time=datetime.now(),
-                message="Position closed",
-            )
-        
-        return OrderResult(
-            order_id="",
-            status=OrderStatus.REJECTED,
-            symbol=symbol,
-            direction="close",
-            requested_size=close_units,
-            message=response.text,
-        )
     
     async def close_all_positions(self) -> List[OrderResult]:
-        """Close all positions."""
+        """Close all open positions (emergency)."""
         positions = await self.get_positions()
         results = []
         
@@ -516,51 +456,48 @@ class OANDAProvider(BaseBroker):
         
         return results
     
-    async def cancel_all_orders(self) -> int:
-        """Cancel all open orders."""
-        orders = await self.get_open_orders()
-        count = 0
+    # ==================== Helper Methods ====================
+    
+    def _normalize_symbol(self, symbol: str) -> str:
+        """
+        Convert symbol to OANDA format.
         
-        for order in orders:
-            if await self.cancel_order(order.order_id):
-                count += 1
+        "EUR/USD" -> "EUR_USD"
+        "EURUSD" -> "EUR_USD"
+        """
+        symbol = symbol.upper().replace("/", "_")
         
-        return count
+        # Handle no separator (EURUSD -> EUR_USD)
+        if "_" not in symbol and len(symbol) == 6:
+            symbol = f"{symbol[:3]}_{symbol[3:]}"
+        
+        return symbol
     
-    # =========================================================================
-    # HELPERS
-    # =========================================================================
+    def _denormalize_symbol(self, instrument: str) -> str:
+        """
+        Convert OANDA format to standard.
+        
+        "EUR_USD" -> "EUR/USD"
+        """
+        return instrument.replace("_", "/")
     
-    def convert_symbol(self, nexus_symbol: str) -> str:
-        """Convert NEXUS symbol to OANDA instrument."""
-        # EUR/USD -> EUR_USD
-        return nexus_symbol.replace("/", "_")
+    # ==================== Indicator Helpers ====================
     
-    def convert_symbol_from_broker(self, oanda_instrument: str) -> str:
-        """Convert OANDA instrument to NEXUS symbol."""
-        # EUR_USD -> EUR/USD
-        return oanda_instrument.replace("_", "/")
+    @staticmethod
+    def calculate_pips(symbol: str, price_diff: float) -> float:
+        """
+        Calculate pip value from price difference.
+        
+        JPY pairs: 1 pip = 0.01
+        Others: 1 pip = 0.0001
+        """
+        if "JPY" in symbol.upper():
+            return price_diff / 0.01
+        return price_diff / 0.0001
     
-    def _convert_timeframe(self, timeframe: str) -> str:
-        """Convert NEXUS timeframe to OANDA granularity."""
-        mapping = {
-            "1m": "M1",
-            "5m": "M5",
-            "15m": "M15",
-            "30m": "M30",
-            "1h": "H1",
-            "4h": "H4",
-            "1d": "D",
-            "1w": "W",
-        }
-        return mapping.get(timeframe, "H1")
-    
-    def _convert_order_status(self, oanda_status: str) -> OrderStatus:
-        """Convert OANDA status to NEXUS status."""
-        mapping = {
-            "PENDING": OrderStatus.PENDING,
-            "FILLED": OrderStatus.FILLED,
-            "TRIGGERED": OrderStatus.FILLED,
-            "CANCELLED": OrderStatus.CANCELLED,
-        }
-        return mapping.get(oanda_status, OrderStatus.PENDING)
+    @staticmethod
+    def pip_value(symbol: str) -> float:
+        """Get pip value for a symbol."""
+        if "JPY" in symbol.upper():
+            return 0.01
+        return 0.0001

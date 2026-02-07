@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.pool import NullPool
 
-from config.settings import settings
+from nexus.config.settings import settings
 
 logger = logging.getLogger(__name__)
 

@@ -12,7 +12,7 @@ from typing import List, Optional
 from sqlalchemy import select, update, and_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from storage.models import (
+from .models import (
     SignalRecord,
     TradeRecord,
     DailyPerformance,
@@ -20,7 +20,7 @@ from storage.models import (
     SystemState,
     AlertLog,
 )
-from core.models import NexusSignal, TradeResult
+from nexus.core.models import NexusSignal, TradeResult
 
 logger = logging.getLogger(__name__)
 

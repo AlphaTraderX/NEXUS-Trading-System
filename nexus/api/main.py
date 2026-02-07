@@ -4,7 +4,7 @@ FastAPI application entry for NEXUS API.
 
 from fastapi import FastAPI
 
-from api.routes import signals, positions, performance, settings
+from .routes import signals, positions, performance, settings
 
 app = FastAPI(
     title="NEXUS Trading API",
