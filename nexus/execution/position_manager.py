@@ -12,6 +12,7 @@ Think of this as the foreman who knows exactly what's happening
 on every job site at any given moment.
 """
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Optional, Dict, List, Any
@@ -23,6 +24,7 @@ from nexus.core.enums import Market, Direction, EdgeType, SignalStatus
 from nexus.core.models import NexusSignal, TrackedPosition
 from nexus.risk.heat_manager import DynamicHeatManager
 from nexus.risk.correlation import CorrelationMonitor
+from nexus.storage.service import get_storage_service
 
 
 logger = logging.getLogger(__name__)
@@ -442,6 +444,7 @@ class PositionManager:
             f"(size: {position.size})"
         )
 
+        self._schedule_sync_to_database()
         return position
 
     def update_price(self, symbol: str, new_price: float) -> List[Position]:
@@ -458,7 +461,8 @@ class PositionManager:
             if position and position.status == PositionStatus.OPEN:
                 position.update_price(new_price)
                 updated.append(position)
-
+        if updated:
+            self._schedule_sync_to_database()
         return updated
 
     def update_all_prices(self, prices: Dict[str, float]) -> List[Position]:
@@ -538,6 +542,7 @@ class PositionManager:
             f"Reason: {exit_reason})"
         )
 
+        self._schedule_sync_to_database()
         return position
 
     def cancel_position(self, position_id: str, reason: str = "cancelled") -> Position:
@@ -686,6 +691,30 @@ class PositionManager:
         if not position:
             raise ValueError(f"Position not found: {position_id}")
         return position
+
+    async def sync_to_database(self) -> None:
+        """Sync current positions to database."""
+        try:
+            storage = get_storage_service()
+            if not storage._initialized:
+                return
+            positions_dict = {
+                pos_id: pos.to_dict() if hasattr(pos, "to_dict") else str(pos)
+                for pos_id, pos in self._positions.items()
+            }
+            metrics = self.get_portfolio_metrics()
+            heat = getattr(metrics, "portfolio_heat", 0.0)
+            await storage.update_positions(positions_dict, heat)
+        except Exception as e:
+            logger.warning("Failed to sync positions to database: %s", e)
+
+    def _schedule_sync_to_database(self) -> None:
+        """Schedule async sync_to_database from sync context (fire-and-forget)."""
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.sync_to_database())
+        except RuntimeError:
+            pass
 
     def get_positions_summary(self) -> str:
         """Get a human-readable summary of all positions."""

@@ -7,8 +7,32 @@ Tests that the full pipeline works: Provider → Scanner → Opportunity.
 
 import asyncio
 import logging
+import os
 import sys
 from datetime import datetime, timezone
+
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Get credentials from environment (via settings or directly)
+try:
+    from nexus.config.settings import settings
+    POLYGON_API_KEY = settings.polygon_api_key
+    OANDA_API_KEY = settings.oanda_api_key
+    OANDA_ACCOUNT_ID = settings.oanda_account_id
+except ImportError:
+    # Fallback to direct env vars if settings not available
+    POLYGON_API_KEY = os.getenv("NEXUS_POLYGON_API_KEY", "")
+    OANDA_API_KEY = os.getenv("NEXUS_OANDA_API_KEY", "")
+    OANDA_ACCOUNT_ID = os.getenv("NEXUS_OANDA_ACCOUNT_ID", "")
+
+# Validate credentials exist
+if not POLYGON_API_KEY:
+    raise ValueError("NEXUS_POLYGON_API_KEY not set in environment")
+if not OANDA_API_KEY:
+    raise ValueError("NEXUS_OANDA_API_KEY not set in environment")
 
 # Configure logging
 logging.basicConfig(
@@ -17,11 +41,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 logger = logging.getLogger(__name__)
-
-# API Credentials - MOVE TO .env IN PRODUCTION
-MASSIVE_API_KEY = "***REDACTED***"
-OANDA_API_KEY = "***REDACTED***"
-OANDA_ACCOUNT_ID = "101-004-38468446-001"
 
 
 async def test_data_fetch():
@@ -33,7 +52,7 @@ async def test_data_fetch():
     print("📊 TESTING REAL DATA FETCH (Always runs)")
     print("=" * 60)
 
-    provider = MassiveProvider(api_key=MASSIVE_API_KEY)
+    provider = MassiveProvider(api_key=POLYGON_API_KEY)
     connected = await provider.connect()
 
     if not connected:
@@ -73,7 +92,7 @@ async def test_single_scanner_with_massive():
     print("=" * 60)
 
     # Create and connect provider
-    provider = MassiveProvider(api_key=MASSIVE_API_KEY)
+    provider = MassiveProvider(api_key=POLYGON_API_KEY)
     connected = await provider.connect()
 
     if not connected:
@@ -199,7 +218,7 @@ async def test_orchestrator():
     print("=" * 60)
 
     # Create and connect provider
-    provider = MassiveProvider(api_key=MASSIVE_API_KEY)
+    provider = MassiveProvider(api_key=POLYGON_API_KEY)
     connected = await provider.connect()
 
     if not connected:

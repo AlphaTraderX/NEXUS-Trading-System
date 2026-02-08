@@ -27,6 +27,7 @@ from nexus.execution.order_manager import (
     OrderPurpose,
     OrderManager,
 )
+from nexus.storage.service import get_storage_service
 
 
 logger = logging.getLogger(__name__)
@@ -669,7 +670,7 @@ class TradeExecutor:
 
         # Process result
         if result.success and result.status == "filled":
-            self._handle_fill(order, result)
+            await self._handle_fill(order, result)
         elif not result.success:
             self._handle_rejection(order, result)
 
@@ -712,7 +713,7 @@ class TradeExecutor:
             message=f"Failed after {max_retries} attempts: {last_error}",
         )
 
-    def _handle_fill(self, order: Order, result: ExecutionResult):
+    async def _handle_fill(self, order: Order, result: ExecutionResult):
         """Handle a successful fill."""
         # Record fill in OrderManager
         self.order_manager.record_fill(
@@ -724,6 +725,25 @@ class TradeExecutor:
         )
 
         self._execution_stats["orders_filled"] += 1
+
+        # Log trade to database
+        try:
+            storage = get_storage_service()
+            if storage._initialized and order.signal_id:
+                fill_price = result.fill_price or 0.0
+                fill_size = result.fill_size or order.quantity
+                direction = "long" if order.side == OrderSide.BUY else "short"
+                trade_data = {
+                    "entry_price": fill_price,
+                    "entry_time": result.timestamp,
+                    "position_size": fill_size,
+                    "direction": direction,
+                    "symbol": order.symbol,
+                    "market": order.market.value if hasattr(order.market, "value") else str(order.market),
+                }
+                await storage.save_trade(trade_data, order.signal_id)
+        except Exception as e:
+            logger.warning("Failed to save trade to database: %s", e)
 
         # Notify callbacks
         for callback in self._on_fill_callbacks:

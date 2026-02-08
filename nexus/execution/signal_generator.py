@@ -38,6 +38,7 @@ from nexus.risk.heat_manager import DynamicHeatManager
 from nexus.risk.circuit_breaker import SmartCircuitBreaker
 from nexus.risk.kill_switch import KillSwitch
 from nexus.risk.correlation import CorrelationMonitor
+from nexus.storage.service import get_storage_service
 
 
 logger = logging.getLogger(__name__)
@@ -444,6 +445,14 @@ class SignalGenerator:
             getattr(signal.tier, "value", signal.tier),
             signal.net_expected,
         )
+
+        # Save signal to database
+        try:
+            storage = get_storage_service()
+            if storage._initialized:
+                await storage.save_signal(signal)
+        except Exception as e:
+            logger.warning("Failed to save signal to database: %s", e)
 
         return signal
 

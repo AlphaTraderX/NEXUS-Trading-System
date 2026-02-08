@@ -489,3 +489,36 @@ class AuditLog(Base):
             f"AuditLog(id={self.id!r}, event_type={self.event_type!r}, "
             f"severity={self.severity!r})"
         )
+
+
+# =============================================================================
+# ALERT LOG
+# =============================================================================
+
+
+class AlertLog(Base):
+    """
+    Log of sent alerts (Discord, Telegram, etc.).
+    """
+    __tablename__ = "alert_logs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), primary_key=True, default=uuid.uuid4
+    )
+    sent_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, index=True, nullable=False
+    )
+    alert_type: Mapped[str] = mapped_column(String(50), index=True, nullable=False)
+    message: Mapped[str] = mapped_column(String(500), nullable=False)
+    channel: Mapped[str] = mapped_column(String(30), nullable=False)
+    success: Mapped[bool] = mapped_column(Boolean, nullable=False)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": str(self.id),
+            "sent_at": self.sent_at.isoformat() if self.sent_at else None,
+            "alert_type": self.alert_type,
+            "message": self.message,
+            "channel": self.channel,
+            "success": self.success,
+        }

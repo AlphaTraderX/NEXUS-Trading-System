@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     # Database (for storage layer)
     database_url: str = "postgresql+asyncpg://user:password@localhost:5432/nexus"
 
+    # AI / LLM
+    groq_api_key: str = ""
+    llm_model: str = "llama-3.1-70b-versatile"
+
     # Optional: IG, IBKR, etc.
     ig_api_key: str = ""
     ig_username: str = ""

@@ -342,3 +342,25 @@ class NexusSignal(BaseModel):
         if hasattr(self.costs, "to_dict"):
             data["costs"] = self.costs.to_dict()
         return data
+
+
+@dataclass
+class TradeResult:
+    """
+    Result of a completed (or partially completed) trade.
+    Used when persisting trade records to storage.
+    """
+    symbol: str
+    market: Union[Market, str]
+    direction: Union[Direction, str]
+    entry_price: float
+    entry_time: datetime
+    position_size: float = 0.0
+    exit_price: Optional[float] = None
+    exit_time: Optional[datetime] = None
+    exit_reason: Optional[str] = None
+    pnl: Optional[float] = None
+    pnl_pct: Optional[float] = None
+    slippage_entry: Optional[float] = None
+    slippage_exit: Optional[float] = None
+    actual_costs: Optional[Any] = None

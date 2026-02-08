@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from nexus.config.settings import settings
 from nexus.core.models import Opportunity
 from nexus.data.massive import MassiveProvider
+from nexus.storage.service import get_storage_service
 from nexus.data.oanda import OANDAProvider
 from nexus.scanners.orchestrator import ScannerOrchestrator
 from nexus.scheduler.market_hours import MarketHours
@@ -163,7 +164,19 @@ class NexusScheduler:
         self.start_time = datetime.now(UTC)
         
         self._print_banner()
-        
+
+        # Initialize storage (database)
+        storage = get_storage_service()
+        if await storage.initialize():
+            self._log("Database connected")
+            state = await storage.get_system_state()
+            if state is None:
+                starting = getattr(settings, "starting_balance", 10000.0)
+                await storage.initialize_system_state(starting)
+                self._log(f"System state initialized with {starting:,.0f}")
+        else:
+            self._log("Database not connected - running in memory-only mode", level="warn")
+
         # Initialize providers
         if not await self.initialize_providers():
             self._log("Failed to initialize. Exiting.", level="error")

@@ -7,12 +7,33 @@ Tests real Discord and Telegram delivery:
 - AlertManager multi-channel delivery
 - All priority levels (CRITICAL, HIGH, NORMAL, LOW)
 
-Credentials: Load from env vars or use hardcoded test values.
+Credentials: Load from settings/environment only.
 """
 
 import asyncio
 import os
 from datetime import datetime, timezone
+
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+try:
+    from nexus.config.settings import settings
+    DISCORD_WEBHOOK = settings.discord_webhook_url
+    TELEGRAM_TOKEN = settings.telegram_bot_token
+    TELEGRAM_CHAT_ID = settings.telegram_chat_id
+except ImportError:
+    DISCORD_WEBHOOK = os.getenv("NEXUS_DISCORD_WEBHOOK_URL", "")
+    TELEGRAM_TOKEN = os.getenv("NEXUS_TELEGRAM_BOT_TOKEN", "")
+    TELEGRAM_CHAT_ID = os.getenv("NEXUS_TELEGRAM_CHAT_ID", "")
+
+# Validate
+if not DISCORD_WEBHOOK:
+    raise ValueError("NEXUS_DISCORD_WEBHOOK_URL not set")
+if not TELEGRAM_TOKEN:
+    raise ValueError("NEXUS_TELEGRAM_BOT_TOKEN not set")
 
 from nexus.core.models import NexusSignal
 from nexus.core.enums import Direction, EdgeType, Market, SignalStatus, SignalTier, AlertPriority
@@ -21,20 +42,6 @@ from nexus.delivery import (
     DiscordDelivery,
     TelegramDelivery,
     AlertManager,
-)
-
-# Test credentials - load from env or use fallback
-DISCORD_WEBHOOK = os.getenv(
-    "DISCORD_WEBHOOK_URL",
-    "https://discordapp.com/api/webhooks/1469994650566918194/***REDACTED***",
-)
-TELEGRAM_TOKEN = os.getenv(
-    "TELEGRAM_BOT_TOKEN",
-    "8561668287:AAH_WwaeGTrULdRn98CKIXmnJUl2QvZia4k",
-)
-TELEGRAM_CHAT_ID = os.getenv(
-    "TELEGRAM_CHAT_ID",
-    "8298718605",
 )
 
 
@@ -222,7 +229,7 @@ async def main():
     print("   NEXUS DELIVERY LAYER - LIVE TEST")
     print("🚀" * 25)
     print(f"\nTimestamp: {datetime.now(timezone.utc).isoformat()}")
-    print(f"Creds: {'ENV' if os.getenv('DISCORD_WEBHOOK_URL') else 'hardcoded fallback'}")
+    print(f"Creds: {'ENV/settings' if DISCORD_WEBHOOK else 'not set'}")
 
     results = {}
 

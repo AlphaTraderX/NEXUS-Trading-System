@@ -8,6 +8,7 @@ from nexus.storage.models import (
     EdgePerformance,
     SystemState,
     AuditLog,
+    AlertLog,
 )
 from nexus.storage.database import (
     get_database_url,
@@ -23,6 +24,19 @@ from nexus.storage.database import (
     close_database_async,
     reset_engines,
 )
+from nexus.storage.repositories import (
+    SignalRepository,
+    TradeRepository,
+    SystemStateRepository,
+    DailyPerformanceRepository,
+    EdgePerformanceRepository,
+    AlertLogRepository,
+    save_signal,
+    get_recent_signals,
+    save_trade,
+    get_system_state,
+)
+from nexus.storage.service import StorageService, get_storage_service
 
 __all__ = [
     "Base",
@@ -32,6 +46,7 @@ __all__ = [
     "EdgePerformance",
     "SystemState",
     "AuditLog",
+    "AlertLog",
     "get_database_url",
     "get_sync_engine",
     "get_async_engine",
@@ -44,4 +59,16 @@ __all__ = [
     "close_database",
     "close_database_async",
     "reset_engines",
+    "SignalRepository",
+    "TradeRepository",
+    "SystemStateRepository",
+    "DailyPerformanceRepository",
+    "EdgePerformanceRepository",
+    "AlertLogRepository",
+    "save_signal",
+    "get_recent_signals",
+    "save_trade",
+    "get_system_state",
+    "StorageService",
+    "get_storage_service",
 ]

@@ -19,6 +19,7 @@ from .models import (
     EdgePerformance,
     SystemState,
     AuditLog,
+    AlertLog,
 )
 from nexus.core.models import NexusSignal, TradeResult
 
@@ -148,7 +149,7 @@ class TradeRepository:
         self.session = session
 
     async def save(self, trade: TradeResult, signal_id: str) -> TradeRecord:
-        """Save a completed trade."""
+        """Save a completed trade (full TradeResult from core.models)."""
         record = TradeRecord(
             signal_id=signal_id,
             symbol=trade.symbol,
@@ -156,20 +157,47 @@ class TradeRepository:
             direction=trade.direction.value if hasattr(trade.direction, "value") else trade.direction,
             entry_price=trade.entry_price,
             entry_time=trade.entry_time,
-            exit_price=trade.exit_price,
-            exit_time=trade.exit_time,
-            exit_reason=trade.exit_reason,
+            exit_price=getattr(trade, "exit_price", None),
+            exit_time=getattr(trade, "exit_time", None),
+            exit_reason=getattr(trade, "exit_reason", None),
             position_size=getattr(trade, "position_size", 0.0) or 0.0,
-            pnl=trade.pnl,
+            pnl=getattr(trade, "pnl", None),
             pnl_percent=getattr(trade, "pnl_pct", None) or getattr(trade, "pnl_percent", None),
             slippage_entry=getattr(trade, "slippage_entry", None),
             slippage_exit=getattr(trade, "slippage_exit", None),
-            costs_actual=trade.actual_costs.to_dict() if hasattr(getattr(trade, "actual_costs", None), "to_dict") else getattr(trade, "actual_costs", None),
+            costs_actual=(
+                trade.actual_costs.to_dict()
+                if hasattr(getattr(trade, "actual_costs", None), "to_dict")
+                else getattr(trade, "actual_costs", None)
+            ),
         )
-
         self.session.add(record)
         await self.session.flush()
         logger.info(f"Saved trade for signal {signal_id}")
+        return record
+
+    async def save_entry(self, data: dict, signal_id: str) -> TradeRecord:
+        """Save trade entry only (e.g. when order is filled; exit data added when closed)."""
+        record = TradeRecord(
+            signal_id=signal_id,
+            symbol=data.get("symbol", ""),
+            market=data.get("market", ""),
+            direction=data.get("direction", ""),
+            entry_price=float(data.get("entry_price", 0)),
+            entry_time=data.get("entry_time", datetime.utcnow()),
+            exit_price=None,
+            exit_time=None,
+            exit_reason=None,
+            position_size=float(data.get("position_size", 0)),
+            pnl=None,
+            pnl_percent=None,
+            slippage_entry=data.get("slippage_entry"),
+            slippage_exit=None,
+            costs_actual=data.get("costs_actual"),
+        )
+        self.session.add(record)
+        await self.session.flush()
+        logger.info(f"Saved trade entry for signal {signal_id}")
         return record
 
     async def get_recent(self, limit: int = 50) -> List[TradeRecord]:
@@ -331,3 +359,132 @@ async def get_system_state(session: AsyncSession) -> Optional[SystemState]:
     """Convenience function to get system state."""
     repo = SystemStateRepository(session)
     return await repo.get()
+
+
+# =============================================================================
+# DAILY PERFORMANCE REPOSITORY
+# =============================================================================
+
+
+class DailyPerformanceRepository:
+    """Repository for daily performance metrics."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def save(self, date: datetime, metrics: dict) -> DailyPerformance:
+        """Save or update daily performance record."""
+        from sqlalchemy import select
+        record = DailyPerformance(
+            date=date.date() if hasattr(date, "date") else date,
+            starting_equity=metrics.get("starting_equity", 0),
+            ending_equity=metrics.get("ending_equity", 0),
+            pnl=metrics.get("pnl", 0),
+            pnl_percent=metrics.get("pnl_pct", 0) or metrics.get("pnl_percent", 0),
+            trades_taken=metrics.get("trades_taken", 0),
+            winners=metrics.get("winners", 0),
+            losers=metrics.get("losers", 0),
+            win_rate=metrics.get("win_rate", 0),
+            largest_win=metrics.get("largest_win", 0),
+            largest_loss=metrics.get("largest_loss", 0),
+            average_win=metrics.get("average_win", 0),
+            average_loss=metrics.get("average_loss", 0),
+            profit_factor=metrics.get("profit_factor"),
+            max_drawdown_day=metrics.get("max_drawdown_day", 0) or metrics.get("max_heat", 0),
+            edges_used=metrics.get("edges_used", {}),
+            notes=metrics.get("notes"),
+        )
+        self.session.add(record)
+        await self.session.flush()
+        return record
+
+    async def get_by_date(self, date: datetime):
+        """Get daily performance for a date."""
+        from sqlalchemy import select
+        d = date.date() if hasattr(date, "date") else date
+        result = await self.session.execute(
+            select(DailyPerformance).where(DailyPerformance.date == d)
+        )
+        return result.scalar_one_or_none()
+
+
+# =============================================================================
+# EDGE PERFORMANCE REPOSITORY
+# =============================================================================
+
+
+class EdgePerformanceRepository:
+    """Repository for edge-specific performance."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def update(self, edge_type: str, period: str, period_start: datetime, metrics: dict) -> EdgePerformance:
+        """Upsert edge performance record."""
+        from sqlalchemy import select
+        d = period_start.date() if hasattr(period_start, "date") else period_start
+        result = await self.session.execute(
+            select(EdgePerformance).where(
+                and_(
+                    EdgePerformance.edge_type == edge_type,
+                    EdgePerformance.period == period,
+                    EdgePerformance.period_start == d,
+                )
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing:
+            existing.trades = metrics.get("trades", existing.trades)
+            existing.wins = metrics.get("wins", existing.wins)
+            existing.losses = metrics.get("losses", existing.losses)
+            existing.total_pnl = metrics.get("total_pnl", existing.total_pnl)
+            existing.average_pnl = metrics.get("average_pnl", existing.average_pnl)
+            existing.win_rate = metrics.get("win_rate", existing.win_rate)
+            existing.expected_edge = metrics.get("expected_edge", existing.expected_edge)
+            existing.actual_edge = metrics.get("actual_edge", existing.actual_edge)
+            existing.is_healthy = metrics.get("is_healthy", existing.is_healthy)
+            existing.decay_warnings = metrics.get("decay_warnings", existing.decay_warnings)
+            await self.session.flush()
+            return existing
+        record = EdgePerformance(
+            edge_type=edge_type,
+            period=period,
+            period_start=d,
+            trades=metrics.get("trades", 0),
+            wins=metrics.get("wins", 0),
+            losses=metrics.get("losses", 0),
+            total_pnl=metrics.get("total_pnl", 0),
+            average_pnl=metrics.get("average_pnl", 0),
+            win_rate=metrics.get("win_rate", 0),
+            expected_edge=metrics.get("expected_edge", 0),
+            actual_edge=metrics.get("actual_edge", 0),
+            is_healthy=metrics.get("is_healthy", True),
+            decay_warnings=metrics.get("decay_warnings", 0),
+        )
+        self.session.add(record)
+        await self.session.flush()
+        return record
+
+
+# =============================================================================
+# ALERT LOG REPOSITORY
+# =============================================================================
+
+
+class AlertLogRepository:
+    """Repository for alert delivery logging."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def log(self, alert_type: str, message: str, channel: str, success: bool) -> AlertLog:
+        """Log a sent alert."""
+        record = AlertLog(
+            alert_type=alert_type,
+            message=message[:500] if message else "",
+            channel=channel,
+            success=success,
+        )
+        self.session.add(record)
+        await self.session.flush()
+        return record
