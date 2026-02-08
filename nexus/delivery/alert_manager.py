@@ -279,6 +279,28 @@ class AlertManager:
         self._delivery_history.append(record)
         return record
 
+    async def send_signal_alert(self, signal) -> None:
+        """Send alert for a new trading signal."""
+        direction = getattr(signal.direction, "value", signal.direction)
+        primary_edge = getattr(signal.primary_edge, "value", signal.primary_edge)
+        tier = getattr(signal.tier, "value", signal.tier)
+        reasoning = (signal.ai_reasoning[:200] + "...") if (getattr(signal, "ai_reasoning", None) and len(signal.ai_reasoning) > 200) else (getattr(signal, "ai_reasoning", None) or "No reasoning available")
+        message = f"""
+**NEXUS SIGNAL**
+
+**{str(direction).upper()}** {signal.symbol}
+Entry: {signal.entry_price}
+Stop: {signal.stop_loss}
+Target: {signal.take_profit}
+
+Score: {getattr(signal, "edge_score", 0)}/100 (Tier {tier})
+Edge: {primary_edge}
+Risk: {getattr(signal, "risk_percent", 0):.1f}%
+
+{reasoning}
+"""
+        await self.send_alert(message, priority=AlertPriority.HIGH)
+
     async def _deliver_alert(
         self,
         channel_name: str,

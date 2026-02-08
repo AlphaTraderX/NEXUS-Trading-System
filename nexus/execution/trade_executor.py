@@ -27,6 +27,7 @@ from nexus.execution.order_manager import (
     OrderPurpose,
     OrderManager,
 )
+from nexus.core.models import NexusSignal
 from nexus.storage.service import get_storage_service
 
 
@@ -675,6 +676,27 @@ class TradeExecutor:
             self._handle_rejection(order, result)
 
         return result
+
+    async def execute_signal(self, signal: NexusSignal) -> dict:
+        """Execute a trading signal (create entry order and submit to broker)."""
+        try:
+            order = self.order_manager.create_entry_order(
+                signal,
+                order_type=OrderType.MARKET,
+            )
+            result = await self.execute_order(order)
+            return {
+                "success": result.success,
+                "order_id": order.order_id,
+                "error": None if result.success else result.message,
+            }
+        except Exception as e:
+            logger.exception("execute_signal failed: %s", e)
+            return {
+                "success": False,
+                "order_id": None,
+                "error": str(e),
+            }
 
     async def _submit_with_retry(
         self,

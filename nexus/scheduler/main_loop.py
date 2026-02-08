@@ -7,17 +7,32 @@ The foreman of the operation - tells scanners when to run.
 import asyncio
 import signal
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 from nexus.config.settings import settings
 from nexus.core.models import Opportunity
+from nexus.core.enums import SignalTier, Market, AlertPriority
+from nexus.core.models import SystemHealth
 from nexus.data.massive import MassiveProvider
 from nexus.storage.service import get_storage_service
 from nexus.data.oanda import OANDAProvider
 from nexus.scanners.orchestrator import ScannerOrchestrator
 from nexus.scheduler.market_hours import MarketHours
+from nexus.intelligence.scorer import OpportunityScorer
+from nexus.execution.signal_generator import SignalGenerator
+from nexus.execution.order_manager import OrderManager
+from nexus.execution.trade_executor import TradeExecutor, create_paper_executor
+from nexus.delivery.alert_manager import AlertManager
+from nexus.risk.circuit_breaker import SmartCircuitBreaker
+from nexus.risk.kill_switch import KillSwitch
+from nexus.intelligence.cost_engine import CostEngine
+from nexus.risk.position_sizer import DynamicPositionSizer
+from nexus.risk.heat_manager import DynamicHeatManager
+from nexus.risk.correlation import CorrelationMonitor
+from nexus.execution.signal_generator import AccountState, MarketState
+from nexus.core.enums import MarketRegime
 
 # Conditional import for Windows compatibility
 try:
@@ -49,14 +64,50 @@ class NexusScheduler:
         self.scan_interval = scan_interval
         self.verbose = verbose
         self.running = False
-        
+        self.settings = settings
+
         # Data providers (initialized on start)
         self.polygon: Optional[MassiveProvider] = None
         self.oanda: Optional[OANDAProvider] = None
-        
+
         # Orchestrator (initialized with providers)
         self.orchestrator: Optional[ScannerOrchestrator] = None
-        
+
+        # Intelligence
+        self.scorer = OpportunityScorer()
+
+        # Risk Management
+        self.circuit_breaker = SmartCircuitBreaker(self.settings)
+        self.kill_switch = KillSwitch(self.settings)
+
+        # Cost / sizing / heat / correlation (for SignalGenerator)
+        self.cost_engine = CostEngine()
+        self.position_sizer = DynamicPositionSizer(self.settings)
+        self.heat_manager = DynamicHeatManager(self.settings)
+        self.correlation_monitor = CorrelationMonitor(self.settings)
+
+        # Execution (paper trading mode)
+        self.order_manager = OrderManager()
+        self.trade_executor = TradeExecutor(order_manager=self.order_manager)
+        # Register paper broker so execute_order can run
+        paper_broker = create_paper_executor(
+            account_balance=getattr(self.settings, "starting_balance", 10000.0),
+        )
+        self.trade_executor.register_broker("paper", paper_broker, markets=[Market.US_STOCKS, Market.FOREX], set_default=True)
+
+        # Signal Generation
+        self.signal_generator = SignalGenerator(
+            cost_engine=self.cost_engine,
+            position_sizer=self.position_sizer,
+            heat_manager=self.heat_manager,
+            circuit_breaker=self.circuit_breaker,
+            kill_switch=self.kill_switch,
+            correlation_monitor=self.correlation_monitor,
+        )
+
+        # Delivery
+        self.alert_manager = AlertManager()
+
         # Stats
         self.scan_count = 0
         self.opportunities_found = 0
@@ -106,53 +157,181 @@ class NexusScheduler:
         except Exception as e:
             self._log(f"Error during shutdown: {e}", level="error")
     
-    async def run_scan_cycle(self) -> list[Opportunity]:
-        """
-        Run one complete scan cycle.
-        
-        Checks market hours and runs appropriate scanners.
-        """
-        opportunities = []
-        
-        # Get current market status
-        status = MarketHours.get_market_status()
-        
-        # Log scan start
-        self._log(f"--- Scan #{self.scan_count} ---")
-        
-        # Log market status on first scan, then every 10 scans
-        if self.scan_count == 1 or self.scan_count % 10 == 0:
-            self._log_market_status(status)
-        
-        # Run orchestrator if any market is open
-        any_market_open = any(status["markets"].values())
-        
-        if not any_market_open:
-            self._log("Markets closed - skipping scanners")
-            return opportunities
-        
-        # Log which markets are being scanned
-        open_markets = [m for m, is_open in status["markets"].items() if is_open]
-        self._log(f"Scanning: {', '.join(open_markets)}")
-        
-        # Run the scan
+    async def run_scan_cycle(self) -> None:
+        """Run one complete scan → score → signal → execute → alert cycle."""
+        cycle_start = datetime.now(timezone.utc)
+        logger.info(f"{'='*60}")
+        logger.info(f"SCAN CYCLE START: {cycle_start.strftime('%H:%M:%S')} UTC")
+
         try:
+            # Step 1: Check Kill Switch conditions
+            system_state = await self._get_system_state()
+            health = SystemHealth(
+                last_heartbeat=cycle_start,
+                last_data_update=cycle_start,
+                seconds_since_heartbeat=system_state.get("seconds_since_heartbeat", 0),
+                seconds_since_data=system_state.get("data_age_seconds", 0),
+                drawdown_pct=system_state.get("drawdown_pct", 0.0),
+                is_connected=True,
+                active_errors=[],
+            )
+            kill_status = self.kill_switch.check_conditions(health)
+
+            if kill_status.is_triggered:
+                logger.critical(f"KILL SWITCH: {kill_status.message}")
+                await self.alert_manager.send_alert(
+                    f"KILL SWITCH ACTIVATED: {kill_status.message}",
+                    priority=AlertPriority.CRITICAL,
+                )
+                return
+
+            # Step 2: Check Circuit Breaker
+            account_state_dict = await self._get_account_state()
+            circuit_status = self.circuit_breaker.check_status(
+                daily_pnl_pct=account_state_dict["daily_pnl_pct"],
+                weekly_pnl_pct=account_state_dict["weekly_pnl_pct"],
+                drawdown_pct=account_state_dict["drawdown_pct"],
+            )
+
+            if not circuit_status.can_trade:
+                logger.warning(f"Circuit breaker: {circuit_status.message}")
+                return
+
+            # Market hours: skip scanners if no market open
+            status = MarketHours.get_market_status()
+            any_market_open = any(status["markets"].values())
+            if not any_market_open:
+                logger.info("Markets closed - skipping scanners")
+                return
+
+            # Step 3: Run scanners to find opportunities
             opportunities = await self.orchestrator.run_scan_cycle()
-            
-            if opportunities:
-                self.opportunities_found += len(opportunities)
-                self._log_opportunities(opportunities)
-                
+            logger.info(f"Found {len(opportunities)} raw opportunities")
+
+            if not opportunities:
+                logger.info("No opportunities this cycle")
+                return
+
+            self.opportunities_found += len(opportunities)
+
+            # Step 4: Score each opportunity
+            scored_opportunities = []
+            for opp in opportunities:
+                try:
+                    trend_alignment = {"alignment": "NEUTRAL"}
+                    volume_ratio = opp.edge_data.get("volume_ratio", 1.0) if getattr(opp, "edge_data", None) else 1.0
+                    regime = getattr(self, "regime_detector", None)
+                    regime_val = regime.current_regime if regime and hasattr(regime, "current_regime") else None
+                    if regime_val is None:
+                        regime_val = MarketRegime.RANGING
+
+                    scored = self.scorer.score(
+                        opportunity=opp,
+                        trend_alignment=trend_alignment,
+                        volume_ratio=volume_ratio,
+                        regime=regime_val,
+                        cost_analysis={"cost_ratio": 25},
+                    )
+
+                    # CRITICAL: Reject F-tier signals
+                    tier_val = getattr(scored.tier, "value", scored.tier)
+                    if tier_val == SignalTier.F.value or tier_val == "F":
+                        logger.debug(f"Rejecting F-tier: {opp.symbol} (score: {scored.score})")
+                        continue
+
+                    scored_opportunities.append(scored)
+                    logger.info(f"Scored {opp.symbol}: {scored.score}/100 (Tier {tier_val})")
+
+                except Exception as e:
+                    logger.error(f"Error scoring {opp.symbol}: {e}")
+                    continue
+
+            logger.info(f"{len(scored_opportunities)} opportunities passed scoring")
+
+            if not scored_opportunities:
+                return
+
+            # Build AccountState and MarketState for signal generator
+            account_state = AccountState(
+                starting_balance=account_state_dict["starting_balance"],
+                current_equity=account_state_dict["current_equity"],
+                daily_pnl=0.0,
+                daily_pnl_pct=account_state_dict["daily_pnl_pct"],
+                weekly_pnl_pct=account_state_dict["weekly_pnl_pct"],
+                drawdown_pct=account_state_dict["drawdown_pct"],
+                portfolio_heat=0.0,
+                win_streak=0,
+                open_positions=[],
+            )
+            market_state = MarketState(regime=MarketRegime.RANGING)
+
+            # Step 5: Generate signals for qualifying opportunities
+            signals_generated = []
+            for scored_opp in scored_opportunities:
+                try:
+                    signal = await self.signal_generator.generate_signal(
+                        scored_opp=scored_opp,
+                        account_state=account_state,
+                        market_state=market_state,
+                    )
+
+                    if signal:
+                        signals_generated.append(signal)
+                        logger.info(f"SIGNAL: {signal.direction.value} {signal.symbol} @ {signal.entry_price}")
+
+                except Exception as e:
+                    logger.error(f"Error generating signal for {scored_opp.opportunity.symbol}: {e}")
+                    continue
+
+            logger.info(f"Generated {len(signals_generated)} signals")
+
+            # Step 6: Execute signals (paper trading)
+            for signal in signals_generated:
+                try:
+                    if self.settings.paper_trading:
+                        result = await self.trade_executor.execute_signal(signal)
+
+                        if result and result.get("success"):
+                            logger.info(f"Order submitted: {signal.symbol}")
+                            await self.alert_manager.send_signal_alert(signal)
+                        else:
+                            logger.warning(f"Order failed: {signal.symbol} - {result.get('error', 'Unknown')}")
+                    else:
+                        logger.info(f"LIVE MODE: Would execute {signal.symbol} (not implemented)")
+
+                except Exception as e:
+                    logger.error(f"Error executing signal {signal.symbol}: {e}")
+                    continue
+
+            elapsed = (datetime.now(timezone.utc) - cycle_start).total_seconds()
+            logger.info(
+                f"CYCLE COMPLETE: {elapsed:.2f}s | {len(opportunities)} scanned -> {len(scored_opportunities)} scored -> {len(signals_generated)} signals"
+            )
+            logger.info(f"{'='*60}")
+
         except Exception as e:
-            self._log(f"Scan cycle error: {e}", level="error")
-        
-        # Log scan completion
-        if opportunities:
-            self._log(f"Found {len(opportunities)} opportunities!")
-        else:
-            self._log("No opportunities this cycle")
-        
-        return opportunities
+            logger.error(f"Scan cycle error: {e}", exc_info=True)
+
+    async def _get_system_state(self) -> dict:
+        """Get current system state for kill switch checks."""
+        return {
+            "daily_pnl_pct": 0.0,
+            "weekly_pnl_pct": 0.0,
+            "drawdown_pct": 0.0,
+            "seconds_since_heartbeat": 0,
+            "data_age_seconds": 0,
+        }
+
+    async def _get_account_state(self) -> dict:
+        """Get current account state for circuit breaker."""
+        balance = getattr(self.settings, "starting_balance", 10000.0)
+        return {
+            "daily_pnl_pct": 0.0,
+            "weekly_pnl_pct": 0.0,
+            "drawdown_pct": 0.0,
+            "current_equity": balance,
+            "starting_balance": balance,
+        }
     
     async def start(self):
         """
