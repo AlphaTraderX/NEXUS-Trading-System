@@ -26,7 +26,7 @@ from nexus.execution.order_manager import OrderManager
 from nexus.execution.trade_executor import TradeExecutor, create_paper_executor
 from nexus.delivery.alert_manager import AlertManager
 from nexus.risk.circuit_breaker import SmartCircuitBreaker
-from nexus.risk.kill_switch import KillSwitch
+from nexus.risk.kill_switch import KillSwitch, set_kill_switch
 from nexus.intelligence.cost_engine import CostEngine
 from nexus.risk.position_sizer import DynamicPositionSizer
 from nexus.risk.heat_manager import DynamicHeatManager
@@ -79,6 +79,7 @@ class NexusScheduler:
         # Risk Management
         self.circuit_breaker = SmartCircuitBreaker(self.settings)
         self.kill_switch = KillSwitch(self.settings)
+        set_kill_switch(self.kill_switch)
 
         # Cost / sizing / heat / correlation (for SignalGenerator)
         self.cost_engine = CostEngine()
@@ -164,17 +165,11 @@ class NexusScheduler:
         logger.info(f"SCAN CYCLE START: {cycle_start.strftime('%H:%M:%S')} UTC")
 
         try:
-            # Step 1: Check Kill Switch conditions
-            system_state = await self._get_system_state()
-            health = SystemHealth(
-                last_heartbeat=cycle_start,
-                last_data_update=cycle_start,
-                seconds_since_heartbeat=system_state.get("seconds_since_heartbeat", 0),
-                seconds_since_data=system_state.get("data_age_seconds", 0),
-                drawdown_pct=system_state.get("drawdown_pct", 0.0),
-                is_connected=True,
-                active_errors=[],
-            )
+            # Update heartbeat to show scheduler is alive
+            self.kill_switch.update_heartbeat()
+
+            # Step 1: Check Kill Switch conditions (use real staleness from kill switch)
+            health = self.kill_switch.get_system_health()
             kill_status = self.kill_switch.check_conditions(health)
 
             if kill_status.is_triggered:
@@ -314,12 +309,13 @@ class NexusScheduler:
 
     async def _get_system_state(self) -> dict:
         """Get current system state for kill switch checks."""
+        health = self.kill_switch.get_system_health()
         return {
-            "daily_pnl_pct": 0.0,
+            "daily_pnl_pct": 0.0,  # TODO: Get from position manager
             "weekly_pnl_pct": 0.0,
             "drawdown_pct": 0.0,
-            "seconds_since_heartbeat": 0,
-            "data_age_seconds": 0,
+            "seconds_since_heartbeat": health.seconds_since_heartbeat,
+            "data_age_seconds": health.seconds_since_data,
         }
 
     async def _get_account_state(self) -> dict:

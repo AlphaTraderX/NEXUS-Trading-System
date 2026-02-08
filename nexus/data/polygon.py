@@ -114,6 +114,14 @@ class PolygonProvider(BaseDataProvider):
         last_quote = ticker.get("lastQuote", {})
         last_trade = ticker.get("lastTrade", {})
         
+        try:
+            from nexus.risk.kill_switch import get_kill_switch
+            kill_switch = get_kill_switch()
+            if kill_switch:
+                kill_switch.update_data_timestamp()
+        except Exception:
+            pass  # Don't crash on kill switch update failure
+
         return Quote(
             symbol=symbol,
             bid=float(last_quote.get("p", 0)) if last_quote else float(day.get("c", 0)),
@@ -142,6 +150,14 @@ class PolygonProvider(BaseDataProvider):
         bar = results[0]
         close = float(bar.get("c", 0))
         
+        try:
+            from nexus.risk.kill_switch import get_kill_switch
+            kill_switch = get_kill_switch()
+            if kill_switch:
+                kill_switch.update_data_timestamp()
+        except Exception:
+            pass  # Don't crash on kill switch update failure
+
         return Quote(
             symbol=symbol,
             bid=close,
@@ -196,6 +212,14 @@ class PolygonProvider(BaseDataProvider):
         if not results:
             return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         
+        try:
+            from nexus.risk.kill_switch import get_kill_switch
+            kill_switch = get_kill_switch()
+            if kill_switch:
+                kill_switch.update_data_timestamp()
+        except Exception:
+            pass  # Don't crash on kill switch update failure
+
         df = pd.DataFrame([{
             'timestamp': datetime.fromtimestamp(r.get("t", 0) / 1000),
             'open': float(r.get("o", 0)),

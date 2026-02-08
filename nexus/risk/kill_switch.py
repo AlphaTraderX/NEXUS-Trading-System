@@ -391,3 +391,38 @@ class KillSwitch:
         """Check if trading is allowed (kill switch not triggered)."""
         with self._lock:
             return not self._is_triggered
+
+    def get_system_health(self) -> SystemHealth:
+        """Get current system health metrics (heartbeat/data staleness)."""
+        now = datetime.now(UTC)
+        with self._lock:
+            heartbeat_age = 0.0
+            if self._last_heartbeat:
+                heartbeat_age = (now - self._last_heartbeat).total_seconds()
+            data_age = 0.0
+            if self._last_data_update:
+                data_age = (now - self._last_data_update).total_seconds()
+            return SystemHealth(
+                last_heartbeat=self._last_heartbeat,
+                last_data_update=self._last_data_update,
+                seconds_since_heartbeat=heartbeat_age,
+                seconds_since_data=data_age,
+                drawdown_pct=0.0,
+                is_connected=True,
+                active_errors=list(self._active_errors),
+            )
+
+
+# Singleton instance
+_kill_switch_instance: Optional[KillSwitch] = None
+
+
+def get_kill_switch() -> Optional[KillSwitch]:
+    """Get the global kill switch instance."""
+    return _kill_switch_instance
+
+
+def set_kill_switch(instance: KillSwitch) -> None:
+    """Set the global kill switch instance."""
+    global _kill_switch_instance
+    _kill_switch_instance = instance

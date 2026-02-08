@@ -187,6 +187,14 @@ class OANDAProvider(BaseBroker):
         bid = float(bids[0].get("price", 0)) if bids else 0
         ask = float(asks[0].get("price", 0)) if asks else 0
         
+        try:
+            from nexus.risk.kill_switch import get_kill_switch
+            kill_switch = get_kill_switch()
+            if kill_switch:
+                kill_switch.update_data_timestamp()
+        except Exception:
+            pass  # Don't crash on kill switch update failure
+
         return Quote(
             symbol=symbol,
             bid=bid,
@@ -263,6 +271,14 @@ class OANDAProvider(BaseBroker):
         
         df = df.sort_values("timestamp").tail(limit).reset_index(drop=True)
         
+        try:
+            from nexus.risk.kill_switch import get_kill_switch
+            kill_switch = get_kill_switch()
+            if kill_switch:
+                kill_switch.update_data_timestamp()
+        except Exception:
+            pass  # Don't crash on kill switch update failure
+
         return df
     
     # ==================== Account Methods ====================
