@@ -7,6 +7,8 @@ import asyncio
 import os
 import sys
 from datetime import datetime
+
+import pytest
 import pytz
 
 # Add nexus package to path so scanners can be imported
@@ -15,6 +17,7 @@ if _nexus_root not in sys.path:
     sys.path.insert(0, _nexus_root)
 
 
+@pytest.mark.asyncio
 async def test_all_scanners():
     """Test all 13 scanners can run without errors."""
 

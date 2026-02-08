@@ -50,6 +50,25 @@ class NexusMode(str, Enum):
     AGGRESSIVE = "aggressive"
 
 
+class MarketRegime(str, Enum):
+    """Market regime for regime-aware scoring."""
+
+    TRENDING_UP = "trending_up"
+    TRENDING_DOWN = "trending_down"
+    RANGING = "ranging"
+    VOLATILE = "volatile"
+
+
+class SignalTier(str, Enum):
+    """Signal quality tier from scoring."""
+
+    A = "A"
+    B = "B"
+    C = "C"
+    D = "D"
+    F = "F"
+
+
 class SignalStatus(str, Enum):
     """Signal lifecycle status."""
 
@@ -60,3 +79,45 @@ class SignalStatus(str, Enum):
     CANCELLED = "cancelled"
     EXPIRED = "expired"
     REJECTED = "rejected"
+
+
+class AlertPriority(str, Enum):
+    """Priority level for delivery alerts."""
+
+    CRITICAL = "critical"
+    HIGH = "high"
+    NORMAL = "normal"
+    LOW = "low"
+
+
+class CircuitBreakerStatus(str, Enum):
+    """Circuit breaker status for risk management."""
+
+    CLEAR = "clear"  # All systems go
+    WARNING = "warning"  # Caution, but can trade
+    REDUCED = "reduced"  # Trading at reduced size
+    DAILY_STOP = "daily_stop"  # No more trading today
+    WEEKLY_STOP = "weekly_stop"  # No more trading this week
+    FULL_STOP = "full_stop"  # Complete halt - manual review needed
+
+
+class KillSwitchTrigger(str, Enum):
+    """Reason the kill switch was triggered."""
+
+    NONE = "none"
+    MAX_DRAWDOWN = "max_drawdown"
+    CONNECTION_LOSS = "connection_loss"
+    STALE_DATA = "stale_data"
+    MANUAL = "manual"
+    SYSTEM_ERROR = "system_error"
+    BROKER_ERROR = "broker_error"
+
+
+class KillSwitchAction(str, Enum):
+    """Action taken when kill switch triggers."""
+
+    NONE = "none"
+    CANCEL_ALL_ORDERS = "cancel_all_orders"
+    CLOSE_ALL_POSITIONS = "close_all_positions"
+    DISABLE_NEW_TRADES = "disable_new_trades"
+    FULL_SHUTDOWN = "full_shutdown"  # All of the above

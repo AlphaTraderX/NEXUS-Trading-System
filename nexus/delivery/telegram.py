@@ -1,479 +1,293 @@
 """
-NEXUS Telegram Delivery
-Send signals to Telegram for mobile notifications.
-
-FEATURES:
-- Clean, readable format for mobile
-- Markdown formatting
-- Quick action buttons (optional)
-- Multiple chat support
-- Silent mode for off-hours
+NEXUS Telegram delivery - send signals and alerts via Bot API.
 """
 
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Any
-from datetime import datetime
-import os
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import asyncio
+import logging
+from typing import Callable, Optional
 
-# Optional telegram import
-try:
-    import httpx
-    HTTPX_AVAILABLE = True
-except ImportError:
-    HTTPX_AVAILABLE = False
+import httpx
 
-from nexus.core.enums import Direction, EdgeType
+from nexus.config.settings import settings
+from nexus.core.enums import AlertPriority
 from nexus.core.models import NexusSignal
+from nexus.delivery.discord import DeliveryResult
+from nexus.delivery.formatter import formatter
 
+logger = logging.getLogger(__name__)
 
-@dataclass
-class TelegramResult:
-    """Result of Telegram delivery attempt."""
-    success: bool
-    message_id: Optional[int] = None
-    error: Optional[str] = None
-    timestamp: datetime = None
-
-    def __post_init__(self):
-        if self.timestamp is None:
-            self.timestamp = datetime.now()
+TELEGRAM_MAX_MESSAGE_LENGTH = 4096
 
 
 class TelegramDelivery:
-    """
-    Send signals to Telegram via Bot API.
-
-    Creates clean, mobile-friendly messages.
-    """
-
-    BASE_URL = "https://api.telegram.org/bot{token}"
-
-    # Tier indicators (text-safe)
-    TIER_INDICATORS = {
-        "A": "[A] ELITE",
-        "B": "[B] STRONG",
-        "C": "[C] STANDARD",
-        "D": "[D] CAUTION",
-        "F": "[F] AVOID",
-    }
+    """Send signals and alerts to Telegram via Bot API."""
 
     def __init__(
         self,
         bot_token: Optional[str] = None,
         chat_id: Optional[str] = None,
-        parse_mode: str = "Markdown",
-        disable_notification: bool = False,
-        quiet_hours: tuple = None,  # (start_hour, end_hour) e.g., (22, 7)
+        retry_attempts: int = 3,
+        retry_delay: float = 5.0,
+        timeout: float = 30.0,
     ):
-        """
-        Initialize Telegram delivery.
-
-        Args:
-            bot_token: Telegram bot token (or set TELEGRAM_BOT_TOKEN env var)
-            chat_id: Default chat ID (or set TELEGRAM_CHAT_ID env var)
-            parse_mode: Message format (Markdown or HTML)
-            disable_notification: Silent messages by default
-            quiet_hours: Tuple of (start, end) hours for silent mode
-        """
-        self.bot_token = bot_token or os.getenv("TELEGRAM_BOT_TOKEN")
-        self.chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID")
-        self.parse_mode = parse_mode
-        self.disable_notification = disable_notification
-        self.quiet_hours = quiet_hours
-
-        # Statistics
-        self.messages_sent = 0
-        self.messages_failed = 0
+        self.bot_token = bot_token or settings.telegram_bot_token
+        self.chat_id = chat_id or settings.telegram_chat_id
+        self.api_url = (
+            f"https://api.telegram.org/bot{self.bot_token}"
+            if self.bot_token
+            else None
+        )
+        self.retry_attempts = retry_attempts
+        self.retry_delay = retry_delay
+        self.timeout = timeout
+        self.client = httpx.AsyncClient(timeout=timeout)
+        self.formatter = formatter
+        self._on_success: Optional[Callable] = None
+        self._on_failure: Optional[Callable] = None
 
     @property
     def is_configured(self) -> bool:
-        """Check if Telegram is configured."""
-        return self.bot_token is not None and self.chat_id is not None and HTTPX_AVAILABLE
+        """Return True if bot token and chat_id are configured."""
+        return bool(self.bot_token and self.chat_id)
 
-    @property
-    def api_url(self) -> str:
-        """Get API URL with token."""
-        return self.BASE_URL.format(token=self.bot_token)
-
-    def _is_quiet_hours(self) -> bool:
-        """Check if current time is in quiet hours."""
-        if not self.quiet_hours:
-            return False
-
-        start, end = self.quiet_hours
-        current_hour = datetime.now().hour
-
-        if start < end:
-            # Same day range (e.g., 9-17)
-            return start <= current_hour < end
-        else:
-            # Overnight range (e.g., 22-7)
-            return current_hour >= start or current_hour < end
-
-    def send_signal(self, signal: NexusSignal, chat_id: str = None) -> TelegramResult:
-        """
-        Send a signal to Telegram.
-
-        Args:
-            signal: The NexusSignal to send
-            chat_id: Override default chat ID
-
-        Returns:
-            TelegramResult with success status
-        """
+    async def send_signal(self, signal: NexusSignal) -> DeliveryResult:
+        """Send a signal to Telegram."""
         if not self.is_configured:
-            return TelegramResult(
+            logger.warning("Telegram not configured: missing bot token or chat_id")
+            return DeliveryResult(
                 success=False,
-                error="Telegram not configured (missing bot token, chat ID, or httpx)"
+                error_message="Telegram not configured (missing bot token or chat_id)",
             )
 
-        try:
-            # Build the message
-            message = self._format_signal(signal)
+        text = self.formatter.format_for_telegram(signal)
+        result = await self._send_message(text, parse_mode="Markdown")
 
-            # Send
-            return self._send_message(
-                text=message,
-                chat_id=chat_id or self.chat_id,
-                silent=self._is_quiet_hours(),
-            )
+        if result.success:
+            logger.info("Signal sent to Telegram successfully: %s", signal.symbol)
+            if self._on_success:
+                self._on_success(result)
+        else:
+            logger.error("Failed to send signal to Telegram: %s", result.error_message)
+            if self._on_failure:
+                self._on_failure(result)
 
-        except Exception as e:
-            self.messages_failed += 1
-            return TelegramResult(
-                success=False,
-                error=str(e),
-            )
+        return result
 
-    def _format_signal(self, signal: NexusSignal) -> str:
-        """Format signal as Telegram message."""
+    async def send_alert(
+        self,
+        message: str,
+        priority: AlertPriority = AlertPriority.NORMAL,
+    ) -> DeliveryResult:
+        """Send a general alert to Telegram."""
+        text = self.formatter.format_alert_telegram(message, priority)
+        return await self._send_message(text, parse_mode="Markdown")
 
-        # Get string values
-        direction = signal.direction.value if hasattr(signal.direction, 'value') else str(signal.direction)
-        tier = signal.tier.value if hasattr(signal.tier, 'value') else str(signal.tier)
-        edge = signal.primary_edge.value if hasattr(signal.primary_edge, 'value') else str(signal.primary_edge)
+    async def send_plain(self, text: str) -> DeliveryResult:
+        """Send raw text without Markdown parsing."""
+        return await self._send_message(text, parse_mode=None)
 
-        # Direction indicator
-        dir_emoji = "LONG" if direction == "long" else "SHORT"
-
-        # Tier indicator
-        tier_text = self.TIER_INDICATORS.get(tier, f"[{tier}]")
-
-        # Build message
-        lines = [
-            f"*NEXUS SIGNAL*",
-            f"*{signal.symbol}* | {tier_text}",
-            "",
-            f"Direction: *{dir_emoji}*",
-            f"Entry: `${signal.entry_price:.2f}`",
-            f"Stop: `${signal.stop_loss:.2f}`",
-            f"Target: `${signal.take_profit:.2f}`",
-            "",
-            f"Score: *{signal.edge_score}/100*",
-            f"R:R: *{signal.risk_reward_ratio:.1f}:1*",
-            f"Risk: `${signal.risk_amount:.2f}` ({signal.risk_percent:.1f}%)",
-            "",
-            f"Edge: _{edge.replace('_', ' ').title()}_",
-            f"Net Edge: +{signal.net_expected:.2f}%",
-        ]
-
-        # Add secondary edges
-        if signal.secondary_edges:
-            secondary = [e.value if hasattr(e, 'value') else str(e) for e in signal.secondary_edges[:2]]
-            secondary_str = ", ".join([e.replace('_', ' ').title() for e in secondary])
-            lines.append(f"Also: _{secondary_str}_")
-
-        # Add position
-        lines.extend([
-            "",
-            f"Position: *{signal.position_size:.1f} units*",
-            f"Value: `${signal.position_value:.2f}`",
-        ])
-
-        # Add AI reasoning (shortened)
-        if signal.ai_reasoning:
-            reasoning = signal.ai_reasoning[:200] + "..." if len(signal.ai_reasoning) > 200 else signal.ai_reasoning
-            lines.extend([
-                "",
-                f"_{reasoning}_",
-            ])
-
-        # Add risk factors
-        if signal.risk_factors:
-            lines.extend([
-                "",
-                "Risks:",
-            ])
-            for risk in signal.risk_factors[:2]:
-                lines.append(f"- {risk}")
-
-        # Add footer
-        valid_time = signal.valid_until.strftime('%H:%M') if signal.valid_until else "N/A"
-        lines.extend([
-            "",
-            f"Valid until: {valid_time} | {signal.session}",
-        ])
-
-        return "\n".join(lines)
-
-    def _send_message(
+    async def _send_message(
         self,
         text: str,
-        chat_id: str,
-        silent: bool = False,
-    ) -> TelegramResult:
-        """Send a message via Telegram API."""
-
-        url = f"{self.api_url}/sendMessage"
-
-        payload = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": self.parse_mode,
-            "disable_notification": silent or self.disable_notification,
-        }
-
-        try:
-            with httpx.Client(timeout=10.0) as client:
-                response = client.post(url, json=payload)
-                data = response.json()
-
-            if data.get("ok"):
-                self.messages_sent += 1
-                return TelegramResult(
-                    success=True,
-                    message_id=data.get("result", {}).get("message_id"),
-                )
-            else:
-                self.messages_failed += 1
-                return TelegramResult(
-                    success=False,
-                    error=data.get("description", "Unknown error"),
-                )
-
-        except Exception as e:
-            self.messages_failed += 1
-            return TelegramResult(
+        parse_mode: Optional[str] = "Markdown",
+    ) -> DeliveryResult:
+        """Send a message with retry logic and Telegram-specific handling."""
+        if not self.is_configured:
+            return DeliveryResult(
                 success=False,
-                error=str(e),
+                error_message="Telegram not configured",
             )
 
-    def send_alert(
-        self,
-        title: str,
-        message: str,
-        chat_id: str = None,
-        silent: bool = None,
-    ) -> TelegramResult:
-        """
-        Send a general alert.
+        if len(text) > TELEGRAM_MAX_MESSAGE_LENGTH:
+            text = text[: TELEGRAM_MAX_MESSAGE_LENGTH - 3] + "..."
+            logger.debug("Message truncated to %d chars", TELEGRAM_MAX_MESSAGE_LENGTH)
 
-        Args:
-            title: Alert title
-            message: Alert message
-            chat_id: Override default chat ID
-            silent: Override notification setting
+        for attempt in range(self.retry_attempts):
+            try:
+                payload: dict = {
+                    "chat_id": self.chat_id,
+                    "text": text,
+                }
+                if parse_mode:
+                    payload["parse_mode"] = parse_mode
 
-        Returns:
-            TelegramResult
-        """
+                logger.debug(
+                    "Sending to Telegram (attempt %d/%d)",
+                    attempt + 1,
+                    self.retry_attempts,
+                )
+                response = await self.client.post(
+                    f"{self.api_url}/sendMessage",
+                    json=payload,
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get("ok"):
+                        logger.debug("Telegram delivery succeeded")
+                        return DeliveryResult(
+                            success=True,
+                            response_code=200,
+                            retry_count=attempt,
+                        )
+                    # 200 but ok=false (shouldn't happen often)
+                    return DeliveryResult(
+                        success=False,
+                        response_code=200,
+                        error_message=str(data),
+                        retry_count=attempt,
+                    )
+
+                if response.status_code == 429:
+                    try:
+                        data = response.json()
+                        params = data.get("parameters", {})
+                        retry_after = params.get(
+                            "retry_after", self.retry_delay
+                        )
+                    except Exception:
+                        retry_after = self.retry_delay
+                    logger.warning(
+                        "Telegram rate limited (429), retrying after %.1fs",
+                        retry_after,
+                    )
+                    await asyncio.sleep(retry_after)
+                    continue
+
+                if response.status_code == 400:
+                    body = response.text or ""
+                    if (
+                        "can't parse entities" in body
+                        and parse_mode is not None
+                    ):
+                        logger.warning(
+                            "Telegram parse error, retrying without Markdown"
+                        )
+                        payload_plain = {
+                            "chat_id": self.chat_id,
+                            "text": text,
+                        }
+                        response2 = await self.client.post(
+                            f"{self.api_url}/sendMessage",
+                            json=payload_plain,
+                        )
+                        if (
+                            response2.status_code == 200
+                            and response2.json().get("ok")
+                        ):
+                            return DeliveryResult(
+                                success=True,
+                                response_code=200,
+                                retry_count=attempt,
+                            )
+                        return DeliveryResult(
+                            success=False,
+                            response_code=response2.status_code,
+                            error_message=response2.text or "",
+                            retry_count=attempt,
+                        )
+                    return DeliveryResult(
+                        success=False,
+                        response_code=400,
+                        error_message=body,
+                        retry_count=attempt,
+                    )
+
+                logger.error(
+                    "Telegram request failed: %d %s",
+                    response.status_code,
+                    (response.text or "")[:200],
+                )
+                return DeliveryResult(
+                    success=False,
+                    response_code=response.status_code,
+                    error_message=response.text,
+                    retry_count=attempt,
+                )
+
+            except httpx.TimeoutException:
+                logger.warning(
+                    "Telegram request timeout (attempt %d/%d)",
+                    attempt + 1,
+                    self.retry_attempts,
+                )
+                if attempt < self.retry_attempts - 1:
+                    delay = self.retry_delay * (2 ** attempt)
+                    await asyncio.sleep(delay)
+                    continue
+                return DeliveryResult(
+                    success=False,
+                    error_message="Timeout",
+                    retry_count=attempt,
+                )
+
+            except httpx.ConnectError as e:
+                logger.warning(
+                    "Telegram connection error (attempt %d/%d): %s",
+                    attempt + 1,
+                    self.retry_attempts,
+                    e,
+                )
+                if attempt < self.retry_attempts - 1:
+                    delay = self.retry_delay * (2 ** attempt)
+                    await asyncio.sleep(delay)
+                    continue
+                return DeliveryResult(
+                    success=False,
+                    error_message=str(e),
+                    retry_count=attempt,
+                )
+
+        return DeliveryResult(
+            success=False,
+            error_message="Max retries exceeded",
+            retry_count=self.retry_attempts - 1,
+        )
+
+    async def get_me(self) -> dict:
+        """GET getMe - returns bot info for testing."""
         if not self.is_configured:
-            return TelegramResult(success=False, error="Telegram not configured")
+            return {}
+        try:
+            response = await self.client.get(f"{self.api_url}/getMe")
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("ok"):
+                    return data.get("result", {})
+            return {}
+        except Exception as e:
+            logger.exception("get_me failed: %s", e)
+            return {}
 
-        text = f"*{title}*\n\n{message}"
-
-        return self._send_message(
-            text=text,
-            chat_id=chat_id or self.chat_id,
-            silent=silent if silent is not None else self._is_quiet_hours(),
+    async def test_connection(self) -> DeliveryResult:
+        """Send a test message to verify Telegram connection."""
+        return await self._send_message(
+            "🔌 NEXUS Telegram connection test",
+            parse_mode=None,
         )
 
-    def send_daily_summary(
-        self,
-        date: datetime,
-        trades_taken: int,
-        winners: int,
-        losers: int,
-        total_pnl: float,
-        total_pnl_pct: float,
-        best_trade: Optional[str] = None,
-        worst_trade: Optional[str] = None,
-        chat_id: str = None,
-    ) -> TelegramResult:
-        """Send daily performance summary."""
+    def on_success(self, callback: Callable) -> None:
+        """Register callback for successful deliveries."""
+        self._on_success = callback
 
-        win_rate = (winners / trades_taken * 100) if trades_taken > 0 else 0
+    def on_failure(self, callback: Callable) -> None:
+        """Register callback for failed deliveries."""
+        self._on_failure = callback
 
-        # Status indicator
-        if total_pnl_pct >= 1.0:
-            status = "Excellent"
-        elif total_pnl_pct >= 0:
-            status = "Positive"
-        elif total_pnl_pct >= -1.0:
-            status = "Minor Loss"
-        else:
-            status = "Significant Loss"
-
-        lines = [
-            f"*NEXUS Daily Summary*",
-            f"_{date.strftime('%d %B %Y')}_",
-            "",
-            f"Status: *{status}*",
-            "",
-            f"Trades: *{trades_taken}*",
-            f"Winners: {winners} | Losers: {losers}",
-            f"Win Rate: *{win_rate:.1f}%*",
-            "",
-            f"P&L: `${total_pnl:.2f}`",
-            f"Return: *{total_pnl_pct:+.2f}%*",
-        ]
-
-        if best_trade:
-            lines.extend(["", f"Best: _{best_trade}_"])
-
-        if worst_trade:
-            lines.extend([f"Worst: _{worst_trade}_"])
-
-        return self.send_alert(
-            title="",
-            message="\n".join(lines),
-            chat_id=chat_id,
-        )
-
-    def send_kill_switch_alert(
-        self,
-        reason: str,
-        message: str,
-        chat_id: str = None,
-    ) -> TelegramResult:
-        """Send kill switch activation alert (never silent)."""
-
-        text = f"""*KILL SWITCH ACTIVATED*
-
-*Reason:* {reason}
-
-{message}
-
-*MANUAL INTERVENTION REQUIRED*"""
-
-        return self._send_message(
-            text=text,
-            chat_id=chat_id or self.chat_id,
-            silent=False,  # Always notify for kill switch
-        )
-
-    def send_circuit_breaker_alert(
-        self,
-        status: str,
-        reason: str,
-        chat_id: str = None,
-    ) -> TelegramResult:
-        """Send circuit breaker alert."""
-
-        if status.lower() == "warning":
-            title = "Circuit Breaker WARNING"
-        else:
-            title = "Circuit Breaker TRIGGERED"
-
-        return self.send_alert(
-            title=title,
-            message=reason,
-            chat_id=chat_id,
-            silent=False,  # Always notify for circuit breaker
-        )
-
-    def get_statistics(self) -> Dict:
-        """Get delivery statistics."""
-        total = self.messages_sent + self.messages_failed
-        return {
-            "configured": self.is_configured,
-            "messages_sent": self.messages_sent,
-            "messages_failed": self.messages_failed,
-            "success_rate": (self.messages_sent / total * 100) if total > 0 else 0,
-            "quiet_hours": self.quiet_hours,
-        }
+    async def close(self) -> None:
+        """Close the HTTP client."""
+        await self.client.aclose()
 
 
-# Test the Telegram delivery (preview mode - doesn't actually send)
-if __name__ == "__main__":
-    from nexus.core.models import NexusSignal
-    from nexus.intelligence.cost_engine import CostBreakdown
-    from nexus.intelligence.scorer import SignalTier
-    from nexus.core.enums import Market, SignalStatus
-
-    print("=" * 60)
-    print("NEXUS TELEGRAM DELIVERY TEST")
-    print("=" * 60)
-
-    delivery = TelegramDelivery(quiet_hours=(22, 7))
-
-    print(f"\nConfigured: {delivery.is_configured}")
-    print(f"Bot token set: {delivery.bot_token is not None}")
-    print(f"Chat ID set: {delivery.chat_id is not None}")
-    print(f"httpx available: {HTTPX_AVAILABLE}")
-    print(f"Quiet hours: {delivery.quiet_hours}")
-    print(f"Currently quiet: {delivery._is_quiet_hours()}")
-
-    # Create a test signal
-    print("\n--- Test 1: Format Signal (Preview) ---")
-
-    test_signal = NexusSignal(
-        signal_id="test-001",
-        created_at=datetime.now(),
-        opportunity_id="opp-001",
-        symbol="AAPL",
-        market=Market.US_STOCKS,
-        direction=Direction.LONG,
-        entry_price=150.0,
-        stop_loss=145.0,
-        take_profit=162.0,
-        position_size=20.0,
-        position_value=3000.0,
-        risk_amount=100.0,
-        risk_percent=1.0,
-        primary_edge=EdgeType.INSIDER_CLUSTER,
-        secondary_edges=[EdgeType.RSI_EXTREME],
-        edge_score=85,
-        tier=SignalTier.A,
-        gross_expected=0.35,
-        costs=CostBreakdown(spread=0.02, commission=0.01, slippage=0.02, overnight=0.02, fx_conversion=0.0, other=0.0),
-        net_expected=0.28,
-        cost_ratio=20.0,
-        ai_reasoning="Insider Cluster setup on AAPL with strong internal confidence. Score 85/100 in bullish market.",
-        confluence_factors=["High conviction", "Trend aligned"],
-        risk_factors=["Earnings in 2 weeks", "VIX elevated"],
-        market_context="Regime: trending_up",
-        session="us_regular",
-        valid_until=datetime.now(),
-        status=SignalStatus.PENDING,
+def create_telegram_delivery(
+    bot_token: Optional[str] = None,
+    chat_id: Optional[str] = None,
+) -> TelegramDelivery:
+    """Create a TelegramDelivery instance with settings from config."""
+    return TelegramDelivery(
+        bot_token=bot_token,
+        chat_id=chat_id,
+        retry_attempts=settings.alert_retry_attempts,
+        retry_delay=settings.alert_retry_delay_seconds,
+        timeout=settings.alert_timeout_seconds,
     )
-
-    # Format signal (preview without sending)
-    message = delivery._format_signal(test_signal)
-
-    print("\nFormatted message:")
-    print("-" * 40)
-    print(message)
-    print("-" * 40)
-
-    # Test 2: Try to send (will fail without credentials)
-    print("\n--- Test 2: Send Signal (Expected to fail) ---")
-    result = delivery.send_signal(test_signal)
-    print(f"Success: {result.success}")
-    print(f"Error: {result.error}")
-
-    # Test 3: Statistics
-    print("\n--- Test 3: Delivery Statistics ---")
-    stats = delivery.get_statistics()
-    print(f"Stats: {stats}")
-
-    print("\n" + "=" * 60)
-    print("TELEGRAM DELIVERY TEST COMPLETE [OK]")
-    print("=" * 60)
-    print("\nTo enable Telegram delivery:")
-    print("1. Create a Telegram bot via @BotFather")
-    print("2. Set TELEGRAM_BOT_TOKEN environment variable")
-    print("3. Set TELEGRAM_CHAT_ID environment variable")
-    print("4. pip install httpx")

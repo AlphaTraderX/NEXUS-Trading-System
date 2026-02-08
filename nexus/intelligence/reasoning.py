@@ -1,27 +1,16 @@
 """
 NEXUS AI Reasoning Engine
-Uses Groq's Llama 3.1 to generate trade explanations.
-
-WHY THIS MATTERS:
-- Helps you understand the trade logic
-- Builds confidence in the system
-- Aids post-trade analysis
-- Makes signals more actionable
-
-GROQ: Fast, cheap LLM inference
-- Llama 3.1 70B for quality reasoning
-- ~100ms response time
-- Very low cost
+Generates human-readable explanations for trading signals using Groq LLM.
 """
 
-from dataclasses import dataclass
-from typing import Dict, Optional, Any
-from datetime import datetime
 import os
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import json
+from typing import Dict, List, Any, Optional
+from dataclasses import dataclass
+from nexus.core.enums import EdgeType, Direction, MarketRegime
+from nexus.core.models import Opportunity
 
-# Optional Groq import - will work without it
+# Optional Groq import - gracefully handle if not installed
 try:
     from groq import Groq
     GROQ_AVAILABLE = True
@@ -29,507 +18,352 @@ except ImportError:
     GROQ_AVAILABLE = False
     Groq = None
 
-from nexus.core.enums import Direction, EdgeType
-from .regime import MarketRegime
-
 
 @dataclass
 class ReasoningResult:
     """Result from AI reasoning generation."""
     explanation: str
-    confidence_factors: list
-    risk_warnings: list
-    action_summary: str
-    model_used: str
-    generation_time_ms: float
-    tokens_used: int
+    risk_factors: List[str]
+    confluence_summary: str
+    confidence_note: str
+    generated_by: str  # "ai" or "template"
 
     def to_dict(self) -> dict:
         return {
             "explanation": self.explanation,
-            "confidence_factors": self.confidence_factors,
-            "risk_warnings": self.risk_warnings,
-            "action_summary": self.action_summary,
-            "model_used": self.model_used,
-            "generation_time_ms": round(self.generation_time_ms, 2),
-            "tokens_used": self.tokens_used,
+            "risk_factors": self.risk_factors,
+            "confluence_summary": self.confluence_summary,
+            "confidence_note": self.confidence_note,
+            "generated_by": self.generated_by,
         }
 
 
 class ReasoningEngine:
     """
-    Generate AI-powered trade explanations using Groq.
+    Generate AI-powered explanations for trading signals.
 
-    Falls back to template-based reasoning if Groq unavailable.
+    Uses Groq API with Llama 3.1 70B for fast, free inference.
+    Falls back to template-based reasoning if API unavailable.
     """
 
-    # Edge descriptions for context
+    # Edge type descriptions for context
     EDGE_DESCRIPTIONS = {
-        EdgeType.INSIDER_CLUSTER: "Multiple company insiders purchasing shares within a short timeframe, indicating strong internal confidence",
+        EdgeType.INSIDER_CLUSTER: "Multiple corporate insiders buying shares within 14 days - strongest documented edge with 2.1% monthly abnormal returns",
         EdgeType.VWAP_DEVIATION: "Price has deviated significantly from Volume Weighted Average Price, suggesting mean reversion opportunity",
-        EdgeType.TURN_OF_MONTH: "Turn of Month effect - historically 100% of equity premium occurs in the 4-day window around month end/start",
-        EdgeType.MONTH_END: "Month-end rebalancing flows from pension funds ($7.5T in assets) create predictable price movements",
-        EdgeType.GAP_FILL: "Price gap from previous close tends to fill with 60-92% probability for small gaps",
-        EdgeType.RSI_EXTREME: "RSI at extreme levels (below 20 or above 80) indicating oversold/overbought conditions ripe for reversal",
-        EdgeType.POWER_HOUR: "Final hour of US trading shows increased volume and momentum continuation patterns",
-        EdgeType.ASIAN_RANGE: "Break of Asian session range during London open, a validated ICT concept",
+        EdgeType.TURN_OF_MONTH: "Turn of Month effect - historically 100% of equity premium earned in 4-day window around month end/start",
+        EdgeType.MONTH_END: "Month-end rebalancing flows from $7.5T pension fund assets create predictable price pressure",
+        EdgeType.GAP_FILL: "Gap detected with high probability of fill - 60-92% of small gaps fill within the session",
+        EdgeType.RSI_EXTREME: "RSI at extreme levels (below 20 or above 80) indicating oversold/overbought condition",
+        EdgeType.POWER_HOUR: "Power Hour (final hour of US session) - U-shaped volume pattern creates momentum opportunities",
+        EdgeType.ASIAN_RANGE: "Asian session range established - London open breakout setup forming",
         EdgeType.ORB: "Opening Range Breakout - break of first 15-30 minute range with volume confirmation",
-        EdgeType.BOLLINGER_TOUCH: "Price touching Bollinger Band in ranging market, 88% mean reversion probability",
-        EdgeType.LONDON_OPEN: "London session open breakout capturing European institutional flow",
-        EdgeType.NY_OPEN: "New York session open capturing US institutional participation",
-        EdgeType.EARNINGS_DRIFT: "Post-earnings announcement drift - momentum continues in direction of surprise",
+        EdgeType.BOLLINGER_TOUCH: "Price touched Bollinger Band in ranging market - 88% mean reversion probability",
+        EdgeType.LONDON_OPEN: "London session open - major liquidity injection creates breakout opportunities",
+        EdgeType.NY_OPEN: "New York session open - highest probability period for establishing daily high/low",
+        EdgeType.EARNINGS_DRIFT: "Post-earnings announcement drift - momentum continuation after earnings surprise",
     }
 
     # Regime descriptions
     REGIME_DESCRIPTIONS = {
-        MarketRegime.TRENDING_UP: "bullish trending market favoring momentum strategies",
-        MarketRegime.TRENDING_DOWN: "bearish trending market requiring defensive positioning",
-        MarketRegime.RANGING: "range-bound market ideal for mean reversion strategies",
-        MarketRegime.VOLATILE: "highly volatile conditions requiring reduced position sizes",
+        MarketRegime.TRENDING_UP: "strong uptrend with momentum favoring longs",
+        MarketRegime.TRENDING_DOWN: "downtrend with defensive positioning recommended",
+        MarketRegime.RANGING: "range-bound conditions favoring mean reversion",
+        MarketRegime.VOLATILE: "high volatility requiring reduced position sizes",
     }
 
-    def __init__(
-        self,
-        api_key: Optional[str] = None,
-        model: str = "llama-3.1-70b-versatile",
-        max_tokens: int = 300,
-        temperature: float = 0.3,
-    ):
+    def __init__(self, api_key: Optional[str] = None, model: str = "llama-3.1-70b-versatile"):
         """
         Initialize reasoning engine.
 
         Args:
-            api_key: Groq API key (or set GROQ_API_KEY env var)
+            api_key: Groq API key. If None, tries GROQ_API_KEY env var.
             model: Model to use (default: llama-3.1-70b-versatile)
-            max_tokens: Max response tokens
-            temperature: Response temperature (lower = more focused)
         """
-        self.api_key = api_key or os.getenv("GROQ_API_KEY")
         self.model = model
-        self.max_tokens = max_tokens
-        self.temperature = temperature
-
+        self.api_key = api_key or os.getenv("GROQ_API_KEY")
         self.client = None
+
         if GROQ_AVAILABLE and self.api_key:
             try:
                 self.client = Groq(api_key=self.api_key)
             except Exception as e:
                 print(f"Warning: Could not initialize Groq client: {e}")
-
-        # Statistics
-        self.total_calls = 0
-        self.total_tokens = 0
-        self.fallback_count = 0
+                self.client = None
 
     @property
-    def is_available(self) -> bool:
-        """Check if Groq is available."""
+    def ai_available(self) -> bool:
+        """Check if AI reasoning is available."""
         return self.client is not None
 
     def generate(
         self,
-        symbol: str,
-        direction: Direction,
-        primary_edge: EdgeType,
-        secondary_edges: list,
-        entry_price: float,
-        stop_loss: float,
-        take_profit: float,
-        score: int,
-        tier: str,
-        regime: MarketRegime,
-        net_edge: float,
-        cost_ratio: float,
-        volume_ratio: float = 1.0,
-        trend_aligned: bool = True,
-        edge_data: Dict = None,
+        opportunity: Opportunity,
+        scored_result: Dict[str, Any],
+        regime_data: Dict[str, Any],
+        cost_analysis: Dict[str, Any],
     ) -> ReasoningResult:
         """
-        Generate AI reasoning for a trade.
+        Generate reasoning for a trading opportunity.
 
         Args:
-            symbol: Trading symbol
-            direction: LONG or SHORT
-            primary_edge: Main edge type
-            secondary_edges: Additional edges
-            entry_price: Entry price
-            stop_loss: Stop loss price
-            take_profit: Take profit price
-            score: Opportunity score (0-100)
-            tier: Signal tier (A/B/C/D)
-            regime: Market regime
-            net_edge: Net edge after costs (%)
-            cost_ratio: Costs as % of gross edge
-            volume_ratio: Current volume vs average
-            trend_aligned: Whether trade aligns with trend
-            edge_data: Additional edge-specific data
+            opportunity: The Opportunity object
+            scored_result: Output from OpportunityScorer.score().to_dict()
+            regime_data: Output from RegimeDetector.detect_regime()
+            cost_analysis: Output from CostEngine.calculate_net_edge()
 
         Returns:
-            ReasoningResult with explanation and analysis
+            ReasoningResult with explanation, risks, and confluence
         """
-        start_time = datetime.now()
 
-        # Get direction string
-        dir_str = direction.value if hasattr(direction, 'value') else str(direction)
-        edge_str = primary_edge.value if hasattr(primary_edge, 'value') else str(primary_edge)
-        regime_str = regime.value if hasattr(regime, 'value') else str(regime)
-
-        # Calculate R:R
-        if dir_str == "long":
-            risk = entry_price - stop_loss
-            reward = take_profit - entry_price
-        else:
-            risk = stop_loss - entry_price
-            reward = entry_price - take_profit
-        rr_ratio = reward / risk if risk > 0 else 0
-
-        # Try Groq first
-        if self.is_available:
+        # Try AI generation first
+        if self.ai_available:
             try:
-                result = self._generate_with_groq(
-                    symbol=symbol,
-                    direction=dir_str,
-                    primary_edge=edge_str,
-                    secondary_edges=[e.value if hasattr(e, 'value') else str(e) for e in secondary_edges],
-                    entry_price=entry_price,
-                    stop_loss=stop_loss,
-                    take_profit=take_profit,
-                    score=score,
-                    tier=tier,
-                    regime=regime_str,
-                    net_edge=net_edge,
-                    cost_ratio=cost_ratio,
-                    rr_ratio=rr_ratio,
-                    volume_ratio=volume_ratio,
-                    trend_aligned=trend_aligned,
-                    edge_data=edge_data or {},
+                return self._generate_ai_reasoning(
+                    opportunity, scored_result, regime_data, cost_analysis
                 )
-
-                elapsed_ms = (datetime.now() - start_time).total_seconds() * 1000
-                result.generation_time_ms = elapsed_ms
-                self.total_calls += 1
-                self.total_tokens += result.tokens_used
-
-                return result
-
             except Exception as e:
-                print(f"Groq generation failed, using fallback: {e}")
+                print(f"AI reasoning failed, falling back to template: {e}")
 
         # Fallback to template-based reasoning
-        self.fallback_count += 1
-        return self._generate_fallback(
-            symbol=symbol,
-            direction=dir_str,
-            primary_edge=primary_edge,
-            secondary_edges=secondary_edges,
-            entry_price=entry_price,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            score=score,
-            tier=tier,
-            regime=regime,
-            net_edge=net_edge,
-            cost_ratio=cost_ratio,
-            rr_ratio=rr_ratio,
-            volume_ratio=volume_ratio,
-            trend_aligned=trend_aligned,
-            edge_data=edge_data or {},
-            start_time=start_time,
+        return self._generate_template_reasoning(
+            opportunity, scored_result, regime_data, cost_analysis
         )
 
-    def _generate_with_groq(
+    def _generate_ai_reasoning(
         self,
-        symbol: str,
-        direction: str,
-        primary_edge: str,
-        secondary_edges: list,
-        entry_price: float,
-        stop_loss: float,
-        take_profit: float,
-        score: int,
-        tier: str,
-        regime: str,
-        net_edge: float,
-        cost_ratio: float,
-        rr_ratio: float,
-        volume_ratio: float,
-        trend_aligned: bool,
-        edge_data: Dict,
+        opportunity: Opportunity,
+        scored_result: Dict[str, Any],
+        regime_data: Dict[str, Any],
+        cost_analysis: Dict[str, Any],
     ) -> ReasoningResult:
-        """Generate reasoning using Groq API."""
+        """Generate reasoning using Groq LLM."""
 
-        # Resolve primary_edge string to EdgeType for description lookup
-        try:
-            edge_type_key = EdgeType(primary_edge) if primary_edge in [e.value for e in EdgeType] else None
-        except (ValueError, TypeError):
-            edge_type_key = None
-        edge_desc = self.EDGE_DESCRIPTIONS.get(edge_type_key, f"Statistical edge: {primary_edge}")
+        # Build context for LLM
+        primary_edge = opportunity.primary_edge
+        if isinstance(primary_edge, str):
+            primary_edge = EdgeType(primary_edge)
 
-        prompt = f"""You are a professional trading analyst explaining a trade signal. Be concise and actionable.
+        edge_desc = self.EDGE_DESCRIPTIONS.get(primary_edge, "Statistical edge detected")
 
-TRADE SIGNAL:
-- Symbol: {symbol}
-- Direction: {direction.upper()}
-- Primary Edge: {primary_edge.replace('_', ' ').title()}
-- Edge Description: {edge_desc}
-- Secondary Edges: {', '.join([e.replace('_', ' ').title() for e in secondary_edges]) if secondary_edges else 'None'}
-- Entry: ${entry_price:.2f}
-- Stop Loss: ${stop_loss:.2f}
-- Take Profit: ${take_profit:.2f}
-- Risk/Reward: {rr_ratio:.1f}:1
-- Score: {score}/100 (Tier {tier})
-- Market Regime: {regime.replace('_', ' ').title()}
-- Net Edge: {net_edge:.2f}% (after {cost_ratio:.0f}% costs)
-- Volume: {volume_ratio:.1f}x average
-- Trend Aligned: {'Yes' if trend_aligned else 'No'}
-{f'- Additional Data: {edge_data}' if edge_data else ''}
+        regime = regime_data.get("regime", MarketRegime.RANGING)
+        if isinstance(regime, str):
+            regime = MarketRegime(regime)
+        regime_desc = self.REGIME_DESCRIPTIONS.get(regime, "current market conditions")
 
-Provide a 2-3 sentence explanation of WHY this is a valid trade opportunity. Focus on the edge, the setup quality, and key risk factors. Be direct and professional."""
+        direction = opportunity.direction
+        if isinstance(direction, str):
+            direction = Direction(direction)
 
-        # Call Groq
+        # Calculate R:R
+        if direction == Direction.LONG:
+            risk = opportunity.entry_price - opportunity.stop_loss
+            reward = opportunity.take_profit - opportunity.entry_price
+        else:
+            risk = opportunity.stop_loss - opportunity.entry_price
+            reward = opportunity.entry_price - opportunity.take_profit
+        rr_ratio = reward / risk if risk > 0 else 0
+
+        factors = scored_result.get("factors", [])
+        factors_text = "\n".join("- " + f for f in factors) if factors else "N/A"
+
+        prompt = f"""You are a professional trading analyst. Generate a brief, actionable explanation for this trading signal.
+
+SIGNAL DETAILS:
+- Symbol: {opportunity.symbol}
+- Direction: {direction.value.upper()}
+- Entry: {opportunity.entry_price}
+- Stop Loss: {opportunity.stop_loss}
+- Take Profit: {opportunity.take_profit}
+- Risk:Reward: {rr_ratio:.1f}:1
+
+PRIMARY EDGE:
+{edge_desc}
+
+SCORE: {scored_result.get('score', 0)}/100 (Tier {scored_result.get('tier', 'C')})
+
+SCORING FACTORS:
+{factors_text}
+
+MARKET REGIME:
+{regime.value} - {regime_desc}
+Regime Reasoning: {regime_data.get('reasoning', 'N/A')}
+
+COST ANALYSIS:
+- Net Edge: {cost_analysis.get('net_edge', 0):.3f}%
+- Cost Ratio: {cost_analysis.get('cost_ratio', 0):.1f}%
+- Viable: {cost_analysis.get('viable', False)}
+
+Respond in JSON format:
+{{
+    "explanation": "2-3 sentence explanation of why this trade makes sense",
+    "risk_factors": ["risk 1", "risk 2", "risk 3"],
+    "confluence_summary": "One sentence summarizing the edge confluence",
+    "confidence_note": "Brief note on conviction level based on score/tier"
+}}
+
+Be specific and actionable. No fluff."""
+
+        # Call Groq API
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {"role": "system", "content": "You are a professional trading analyst. Be concise, direct, and focus on actionable insights."},
+                {"role": "system", "content": "You are a professional trading analyst. Respond only with valid JSON."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=self.max_tokens,
-            temperature=self.temperature,
+            temperature=0.3,
+            max_tokens=500,
         )
 
-        explanation = response.choices[0].message.content.strip()
-        tokens_used = response.usage.total_tokens if response.usage else 0
+        # Parse response
+        content = response.choices[0].message.content.strip()
 
-        # Extract confidence factors
-        confidence_factors = []
-        if score >= 80:
-            confidence_factors.append(f"High conviction score ({score}/100)")
-        if rr_ratio >= 2.0:
-            confidence_factors.append(f"Favorable R:R ({rr_ratio:.1f}:1)")
-        if trend_aligned:
-            confidence_factors.append("Trade aligned with higher timeframe trend")
-        if volume_ratio > 1.5:
-            confidence_factors.append(f"Strong volume confirmation ({volume_ratio:.1f}x)")
-        if secondary_edges:
-            confidence_factors.append(f"Multiple edges ({len(secondary_edges) + 1} total)")
+        # Handle potential markdown code blocks
+        if content.startswith("```"):
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
 
-        # Extract risk warnings
-        risk_warnings = []
-        if not trend_aligned:
-            risk_warnings.append("Trading against higher timeframe trend")
-        if regime == "volatile":
-            risk_warnings.append("Elevated market volatility")
-        if cost_ratio > 40:
-            risk_warnings.append(f"Higher friction costs ({cost_ratio:.0f}% of edge)")
-        if score < 65:
-            risk_warnings.append(f"Moderate conviction score ({score}/100)")
-        if volume_ratio < 1.0:
-            risk_warnings.append("Below average volume")
-
-        # Action summary
-        action_summary = f"{direction.upper()} {symbol} @ ${entry_price:.2f} | Stop ${stop_loss:.2f} | Target ${take_profit:.2f}"
+        result = json.loads(content)
 
         return ReasoningResult(
-            explanation=explanation,
-            confidence_factors=confidence_factors,
-            risk_warnings=risk_warnings,
-            action_summary=action_summary,
-            model_used=self.model,
-            generation_time_ms=0,  # Will be set by caller
-            tokens_used=tokens_used,
+            explanation=result.get("explanation", "AI reasoning generated."),
+            risk_factors=result.get("risk_factors", []),
+            confluence_summary=result.get("confluence_summary", ""),
+            confidence_note=result.get("confidence_note", ""),
+            generated_by="ai"
         )
 
-    def _generate_fallback(
+    def _generate_template_reasoning(
         self,
-        symbol: str,
-        direction: str,
-        primary_edge: EdgeType,
-        secondary_edges: list,
-        entry_price: float,
-        stop_loss: float,
-        take_profit: float,
-        score: int,
-        tier: str,
-        regime: MarketRegime,
-        net_edge: float,
-        cost_ratio: float,
-        rr_ratio: float,
-        volume_ratio: float,
-        trend_aligned: bool,
-        edge_data: Dict,
-        start_time: datetime,
+        opportunity: Opportunity,
+        scored_result: Dict[str, Any],
+        regime_data: Dict[str, Any],
+        cost_analysis: Dict[str, Any],
     ) -> ReasoningResult:
-        """Generate template-based reasoning when Groq unavailable."""
+        """Generate reasoning using templates (fallback when AI unavailable)."""
 
-        # Get edge description
-        edge_desc = self.EDGE_DESCRIPTIONS.get(primary_edge, f"Statistical edge detected")
-        regime_desc = self.REGIME_DESCRIPTIONS.get(regime, "current market conditions")
+        primary_edge = opportunity.primary_edge
+        if isinstance(primary_edge, str):
+            primary_edge = EdgeType(primary_edge)
 
-        # Get string values
-        edge_str = primary_edge.value if hasattr(primary_edge, 'value') else str(primary_edge)
-        dir_str = direction if isinstance(direction, str) else direction.value
+        edge_desc = self.EDGE_DESCRIPTIONS.get(primary_edge, "Statistical edge detected")
+
+        regime = regime_data.get("regime", MarketRegime.RANGING)
+        if isinstance(regime, str):
+            regime = MarketRegime(regime)
+        regime_desc = self.REGIME_DESCRIPTIONS.get(regime, "current conditions")
+
+        direction = opportunity.direction
+        if isinstance(direction, str):
+            direction = Direction(direction)
+
+        score = scored_result.get('score', 0)
+        tier = scored_result.get('tier', 'C')
 
         # Build explanation
-        explanation = f"{edge_str.replace('_', ' ').title()} setup on {symbol}. {edge_desc}. "
-        explanation += f"Score {score}/100 (Tier {tier}) in {regime_desc}. "
-        explanation += f"Net edge of {net_edge:.2f}% after costs with {rr_ratio:.1f}:1 reward-to-risk."
+        direction_word = "long" if direction == Direction.LONG else "short"
+        explanation = f"{primary_edge.value} edge detected on {opportunity.symbol}. {edge_desc}. "
+        explanation += f"Market regime is {regime_desc}, supporting this {direction_word} setup. "
+        explanation += f"Score: {score}/100 (Tier {tier})."
 
-        # Confidence factors
-        confidence_factors = []
-        if score >= 80:
-            confidence_factors.append(f"High conviction ({score}/100)")
-        elif score >= 65:
-            confidence_factors.append(f"Good conviction ({score}/100)")
+        # Build risk factors
+        risk_factors = []
 
-        if rr_ratio >= 2.5:
-            confidence_factors.append(f"Excellent R:R ({rr_ratio:.1f}:1)")
-        elif rr_ratio >= 2.0:
-            confidence_factors.append(f"Good R:R ({rr_ratio:.1f}:1)")
+        cost_ratio = cost_analysis.get('cost_ratio', 0)
+        if cost_ratio > 50:
+            risk_factors.append(f"High cost ratio ({cost_ratio:.0f}%) reduces net edge")
 
-        if trend_aligned:
-            confidence_factors.append("Trend aligned")
+        if regime == MarketRegime.VOLATILE:
+            risk_factors.append("Volatile regime - consider reduced position size")
 
-        if volume_ratio > 1.5:
-            confidence_factors.append(f"High volume ({volume_ratio:.1f}x)")
+        net_edge = cost_analysis.get('net_edge', 0)
+        if net_edge < 0.10:
+            risk_factors.append(f"Thin net edge ({net_edge:.2f}%) leaves little margin for error")
 
-        if secondary_edges:
-            confidence_factors.append(f"{len(secondary_edges) + 1} edges stacked")
+        if not risk_factors:
+            risk_factors.append("Standard market risks apply")
 
-        # Risk warnings
-        risk_warnings = []
-        if not trend_aligned:
-            risk_warnings.append("Counter-trend trade")
+        # Confluence summary
+        factors = scored_result.get('factors', [])
+        positive_factors = [f for f in factors if '+0' not in f and 'Conflicting' not in f and 'Normal' not in f]
+        confluence_summary = f"{len(positive_factors)} positive factors aligned for this setup."
 
-        regime_str = regime.value if hasattr(regime, 'value') else str(regime)
-        if regime_str == "volatile":
-            risk_warnings.append("Volatile market")
-
-        if cost_ratio > 40:
-            risk_warnings.append(f"Higher costs ({cost_ratio:.0f}%)")
-
-        if score < 65:
-            risk_warnings.append("Moderate conviction")
-
-        if rr_ratio < 1.5:
-            risk_warnings.append(f"Lower R:R ({rr_ratio:.1f}:1)")
-
-        # Action summary
-        action_summary = f"{dir_str.upper()} {symbol} @ ${entry_price:.2f} | Stop ${stop_loss:.2f} | Target ${take_profit:.2f}"
-
-        elapsed_ms = (datetime.now() - start_time).total_seconds() * 1000
+        # Confidence note
+        if tier == 'A':
+            confidence_note = "High conviction setup - full position size recommended."
+        elif tier == 'B':
+            confidence_note = "Good conviction - standard to slightly elevated size."
+        elif tier == 'C':
+            confidence_note = "Moderate conviction - standard position size."
+        elif tier == 'D':
+            confidence_note = "Lower conviction - reduced position size recommended."
+        else:
+            confidence_note = "Low conviction - consider skipping this trade."
 
         return ReasoningResult(
             explanation=explanation,
-            confidence_factors=confidence_factors,
-            risk_warnings=risk_warnings,
-            action_summary=action_summary,
-            model_used="fallback_template",
-            generation_time_ms=elapsed_ms,
-            tokens_used=0,
+            risk_factors=risk_factors,
+            confluence_summary=confluence_summary,
+            confidence_note=confidence_note,
+            generated_by="template"
         )
 
-    def get_statistics(self) -> Dict:
-        """Get reasoning engine statistics."""
-        return {
-            "groq_available": self.is_available,
-            "total_calls": self.total_calls,
-            "total_tokens": self.total_tokens,
-            "fallback_count": self.fallback_count,
-            "model": self.model if self.is_available else "fallback_template",
-        }
+    def generate_quick_summary(self, opportunity: Opportunity, score: int, tier: str) -> str:
+        """
+        Generate a one-line summary for quick display.
 
+        Returns: "LONG SPY | VWAP_DEVIATION | Score: 78 (B) | Mean reversion setup"
+        """
+        primary_edge = opportunity.primary_edge
+        if isinstance(primary_edge, str):
+            primary_edge = EdgeType(primary_edge)
 
-# Test the reasoning engine
-if __name__ == "__main__":
-    print("=" * 60)
-    print("NEXUS AI REASONING ENGINE TEST")
-    print("=" * 60)
+        direction = opportunity.direction
+        if isinstance(direction, str):
+            direction = Direction(direction)
 
-    engine = ReasoningEngine()
+        edge_short = {
+            EdgeType.INSIDER_CLUSTER: "Insider buying cluster",
+            EdgeType.VWAP_DEVIATION: "VWAP mean reversion",
+            EdgeType.TURN_OF_MONTH: "Turn of month effect",
+            EdgeType.MONTH_END: "Month-end rebalancing",
+            EdgeType.GAP_FILL: "Gap fill setup",
+            EdgeType.RSI_EXTREME: "RSI extreme reversal",
+            EdgeType.POWER_HOUR: "Power hour momentum",
+            EdgeType.ASIAN_RANGE: "Asian range breakout",
+            EdgeType.ORB: "Opening range breakout",
+            EdgeType.BOLLINGER_TOUCH: "Bollinger band reversion",
+            EdgeType.LONDON_OPEN: "London open breakout",
+            EdgeType.NY_OPEN: "NY open momentum",
+            EdgeType.EARNINGS_DRIFT: "Post-earnings drift",
+        }.get(primary_edge, "Edge detected")
 
-    print(f"\nGroq available: {engine.is_available}")
-    print(f"Model: {engine.model if engine.is_available else 'fallback_template'}")
+        return f"{direction.value.upper()} {opportunity.symbol} | {primary_edge.value} | Score: {score} ({tier}) | {edge_short}"
 
-    # Test 1: Generate reasoning (will use fallback if no API key)
-    print("\n--- Test 1: High Quality Trade ---")
+    def format_for_discord(self, result: ReasoningResult) -> str:
+        """Format reasoning for Discord message."""
+        risks = "\n".join(f"⚠️ {r}" for r in result.risk_factors)
 
-    result = engine.generate(
-        symbol="AAPL",
-        direction=Direction.LONG,
-        primary_edge=EdgeType.INSIDER_CLUSTER,
-        secondary_edges=[EdgeType.RSI_EXTREME],
-        entry_price=150.0,
-        stop_loss=145.0,
-        take_profit=162.0,
-        score=85,
-        tier="A",
-        regime=MarketRegime.TRENDING_UP,
-        net_edge=0.28,
-        cost_ratio=22.0,
-        volume_ratio=1.8,
-        trend_aligned=True,
-        edge_data={"insider_count": 4, "total_value": 2500000},
-    )
+        return f"""**AI Analysis**
+{result.explanation}
 
-    print(f"Explanation: {result.explanation}")
-    print(f"Confidence: {result.confidence_factors}")
-    print(f"Warnings: {result.risk_warnings}")
-    print(f"Action: {result.action_summary}")
-    print(f"Model: {result.model_used}")
-    print(f"Time: {result.generation_time_ms:.1f}ms")
+**Risk Factors**
+{risks}
 
-    # Test 2: Counter-trend trade
-    print("\n--- Test 2: Counter-Trend Trade ---")
+**Confluence:** {result.confluence_summary}
+**Conviction:** {result.confidence_note}
+"""
 
-    result = engine.generate(
-        symbol="MSFT",
-        direction=Direction.SHORT,
-        primary_edge=EdgeType.RSI_EXTREME,
-        secondary_edges=[],
-        entry_price=380.0,
-        stop_loss=390.0,
-        take_profit=365.0,
-        score=58,
-        tier="C",
-        regime=MarketRegime.TRENDING_UP,
-        net_edge=0.12,
-        cost_ratio=45.0,
-        volume_ratio=0.9,
-        trend_aligned=False,
-    )
+    def format_for_telegram(self, result: ReasoningResult) -> str:
+        """Format reasoning for Telegram message."""
+        risks = "\n".join(f"• {r}" for r in result.risk_factors)
 
-    print(f"Explanation: {result.explanation}")
-    print(f"Confidence: {result.confidence_factors}")
-    print(f"Warnings: {result.risk_warnings}")
+        return f"""🤖 *AI Analysis*
+{result.explanation}
 
-    # Test 3: Volatile market
-    print("\n--- Test 3: Volatile Market ---")
+⚠️ *Risk Factors*
+{risks}
 
-    result = engine.generate(
-        symbol="NVDA",
-        direction=Direction.LONG,
-        primary_edge=EdgeType.VWAP_DEVIATION,
-        secondary_edges=[EdgeType.BOLLINGER_TOUCH],
-        entry_price=450.0,
-        stop_loss=440.0,
-        take_profit=470.0,
-        score=72,
-        tier="B",
-        regime=MarketRegime.VOLATILE,
-        net_edge=0.18,
-        cost_ratio=28.0,
-        volume_ratio=2.2,
-        trend_aligned=True,
-    )
-
-    print(f"Explanation: {result.explanation}")
-    print(f"Warnings: {result.risk_warnings}")
-
-    # Test 4: Statistics
-    print("\n--- Test 4: Engine Statistics ---")
-    stats = engine.get_statistics()
-    print(f"Stats: {stats}")
-
-    print("\n" + "=" * 60)
-    print("REASONING ENGINE TEST COMPLETE [OK]")
-    print("=" * 60)
+📊 {result.confluence_summary}
+💡 {result.confidence_note}
+"""

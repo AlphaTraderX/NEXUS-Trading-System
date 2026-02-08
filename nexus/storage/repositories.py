@@ -18,7 +18,7 @@ from .models import (
     DailyPerformance,
     EdgePerformance,
     SystemState,
-    AlertLog,
+    AuditLog,
 )
 from nexus.core.models import NexusSignal, TradeResult
 
@@ -50,7 +50,7 @@ class SignalRepository:
             position_value=signal.position_value,
             risk_amount=signal.risk_amount,
             risk_percent=signal.risk_percent,
-            primary_edge=signal.primary_edge.value if hasattr(signal.primary_edge, 'value') else signal.primary_edge,
+            primary_edge=(signal.primary_edge.value if hasattr(signal.primary_edge, "value") else str(signal.primary_edge))[:30],
             secondary_edges=[e.value if hasattr(e, 'value') else e for e in signal.secondary_edges],
             edge_score=signal.edge_score,
             tier=signal.tier.value if hasattr(signal.tier, 'value') else signal.tier,
@@ -61,12 +61,10 @@ class SignalRepository:
             ai_reasoning=signal.ai_reasoning,
             confluence_factors=signal.confluence_factors,
             risk_factors=signal.risk_factors,
-            market_context=signal.market_context,
-            regime=signal.regime.value if signal.regime and hasattr(signal.regime, 'value') else signal.regime,
-            session=signal.session,
-            status=signal.status.value if hasattr(signal.status, 'value') else signal.status,
+            market_context=getattr(signal, "market_context", None) or None,
+            session=getattr(signal, "session", None) or None,
+            status=signal.status.value if hasattr(signal.status, "value") else signal.status,
             valid_until=signal.valid_until,
-            signal_data=signal.to_dict(),
         )
 
         self.session.add(record)
@@ -133,7 +131,7 @@ class SignalRepository:
         """Get all pending signals."""
         result = await self.session.execute(
             select(SignalRecord)
-            .where(SignalRecord.status == "pending")
+            .where(SignalRecord.status == "PENDING")
             .order_by(SignalRecord.created_at)
         )
         return list(result.scalars().all())
@@ -154,26 +152,19 @@ class TradeRepository:
         record = TradeRecord(
             signal_id=signal_id,
             symbol=trade.symbol,
-            market=trade.market.value if hasattr(trade.market, 'value') else trade.market,
-            direction=trade.direction.value if hasattr(trade.direction, 'value') else trade.direction,
-            primary_edge=trade.primary_edge.value if hasattr(trade.primary_edge, 'value') else trade.primary_edge,
+            market=trade.market.value if hasattr(trade.market, "value") else trade.market,
+            direction=trade.direction.value if hasattr(trade.direction, "value") else trade.direction,
             entry_price=trade.entry_price,
             entry_time=trade.entry_time,
-            planned_stop=trade.planned_stop,
-            planned_target=trade.planned_target,
             exit_price=trade.exit_price,
             exit_time=trade.exit_time,
             exit_reason=trade.exit_reason,
+            position_size=getattr(trade, "position_size", 0.0) or 0.0,
             pnl=trade.pnl,
-            pnl_pct=trade.pnl_pct,
-            r_multiple=trade.r_multiple,
-            position_size=0,  # TODO: Add to TradeResult
-            planned_risk_pct=trade.planned_risk_pct,
-            actual_risk_pct=trade.actual_risk_pct,
-            slippage_entry=trade.slippage_entry,
-            slippage_exit=trade.slippage_exit,
-            actual_costs=trade.actual_costs.to_dict() if hasattr(trade.actual_costs, 'to_dict') else None,
-            hold_duration_minutes=trade.hold_duration_minutes,
+            pnl_percent=getattr(trade, "pnl_pct", None) or getattr(trade, "pnl_percent", None),
+            slippage_entry=getattr(trade, "slippage_entry", None),
+            slippage_exit=getattr(trade, "slippage_exit", None),
+            costs_actual=trade.actual_costs.to_dict() if hasattr(getattr(trade, "actual_costs", None), "to_dict") else getattr(trade, "actual_costs", None),
         )
 
         self.session.add(record)
@@ -191,13 +182,14 @@ class TradeRepository:
         return list(result.scalars().all())
 
     async def get_by_edge(self, edge_type: str, days: int = 30) -> List[TradeRecord]:
-        """Get trades by edge type."""
+        """Get trades by edge type (via signal's primary_edge)."""
         cutoff = datetime.utcnow() - timedelta(days=days)
         result = await self.session.execute(
             select(TradeRecord)
+            .join(SignalRecord, TradeRecord.signal_id == SignalRecord.signal_id)
             .where(
                 and_(
-                    TradeRecord.primary_edge == edge_type,
+                    SignalRecord.primary_edge == edge_type,
                     TradeRecord.entry_time >= cutoff
                 )
             )
@@ -242,7 +234,7 @@ class SystemStateRepository:
         """Initialize system state (first run)."""
         state = SystemState(
             id=1,
-            starting_equity_today=starting_equity,
+            starting_equity=starting_equity,
             current_equity=starting_equity,
             peak_equity=starting_equity,
         )
@@ -263,9 +255,9 @@ class SystemStateRepository:
             .values(
                 current_equity=current_equity,
                 daily_pnl=daily_pnl,
-                daily_pnl_pct=daily_pnl_pct,
-                peak_equity=max(current_equity, current_equity),  # Will need actual peak
-                last_updated=datetime.utcnow(),
+                daily_pnl_percent=daily_pnl_pct,
+                peak_equity=current_equity,
+                updated_at=datetime.utcnow(),
             )
         )
 
@@ -280,9 +272,9 @@ class SystemStateRepository:
             .where(SystemState.id == 1)
             .values(
                 open_positions=positions,
-                open_position_count=len(positions),
                 portfolio_heat=heat,
-                last_updated=datetime.utcnow(),
+                portfolio_heat_percent=heat,
+                updated_at=datetime.utcnow(),
             )
         )
 
@@ -297,8 +289,7 @@ class SystemStateRepository:
             .where(SystemState.id == 1)
             .values(
                 circuit_breaker_status=status,
-                circuit_breaker_reason=reason,
-                last_updated=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
             )
         )
 
@@ -309,9 +300,7 @@ class SystemStateRepository:
             .where(SystemState.id == 1)
             .values(
                 kill_switch_active=True,
-                kill_switch_reason=reason,
-                kill_switch_activated_at=datetime.utcnow(),
-                last_updated=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
             )
         )
 

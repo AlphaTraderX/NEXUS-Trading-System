@@ -1,494 +1,316 @@
 """
 NEXUS Smart Circuit Breaker
-Loss-based circuit breakers that protect capital WITHOUT capping profits.
 
-KEY PRINCIPLE:
-Circuit breakers trigger on LOSSES, not gains or trade count.
-This protects downside while allowing unlimited upside.
+Loss-based circuit breaker that protects capital.
+KEY PRINCIPLE: Only triggers on losses, NEVER caps profits.
 
-LEVELS:
-- Daily loss -1.5%: WARNING (alert, continue trading)
-- Daily loss -2.0%: REDUCE (reduce position sizes 50%)
-- Daily loss -3.0%: STOP (no new trades today)
-- Weekly loss -6.0%: STOP (no new trades this week)
-- Drawdown -10.0%: FULL STOP (manual review required)
-
-THERE ARE NO PROFIT CAPS.
+Graduated response:
+1. WARNING: Alert but continue trading (75% size)
+2. REDUCED: Trade at 50% size
+3. DAILY_STOP: No new trades today
+4. WEEKLY_STOP: No new trades this week
+5. FULL_STOP: Complete halt, manual review required
 """
 
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
-from datetime import datetime, date, timedelta
-from enum import Enum
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import logging
+import threading
+from datetime import date, datetime, timedelta, timezone
+from typing import Optional
+
+from nexus.config.settings import get_settings
+from nexus.core.enums import CircuitBreakerStatus
+from nexus.core.models import CircuitBreakerState
+
+logger = logging.getLogger(__name__)
+
+UTC = timezone.utc
 
 
-class BreakerStatus(Enum):
-    """Circuit breaker status levels."""
-    CLEAR = "clear"           # All systems go
-    WARNING = "warning"       # Alert but continue
-    REDUCED = "reduced"       # Trading with reduced size
-    DAILY_STOP = "daily_stop" # No new trades today
-    WEEKLY_STOP = "weekly_stop"  # No new trades this week
-    FULL_STOP = "full_stop"   # Manual review required
+def _monday_of_week(d: date) -> date:
+    """Return the Monday of the week containing d."""
+    return d - timedelta(days=d.weekday())
 
 
-class BreakerAction(Enum):
-    """Actions to take when breaker triggers."""
-    CONTINUE = "continue"           # Normal trading
-    ALERT = "alert"                 # Send alert, continue
-    REDUCE_SIZE = "reduce_size"     # Reduce position sizes
-    STOP_NEW_TRADES = "stop_new"    # No new positions
-    CLOSE_ALL = "close_all"         # Close all positions
-    FULL_SHUTDOWN = "shutdown"      # Complete shutdown
+def _next_monday_utc(from_date: date) -> datetime:
+    """Next Monday 00:00 UTC after from_date."""
+    this_monday = _monday_of_week(from_date)
+    next_monday = this_monday + timedelta(days=7)
+    return datetime(next_monday.year, next_monday.month, next_monday.day, 0, 0, 0, tzinfo=UTC)
 
 
-@dataclass
-class BreakerState:
-    """Current state of circuit breakers."""
-    status: BreakerStatus
-    action: BreakerAction
-    can_trade: bool
-    size_multiplier: float
-    reason: str
-
-    # Current metrics
-    daily_pnl_pct: float
-    weekly_pnl_pct: float
-    drawdown_pct: float
-
-    # Thresholds hit
-    thresholds_hit: List[str] = field(default_factory=list)
-
-    # Recovery info
-    recovery_time: Optional[datetime] = None
-    requires_manual_reset: bool = False
-
-    def to_dict(self) -> dict:
-        return {
-            "status": self.status.value,
-            "action": self.action.value,
-            "can_trade": self.can_trade,
-            "size_multiplier": self.size_multiplier,
-            "reason": self.reason,
-            "metrics": {
-                "daily_pnl_pct": round(self.daily_pnl_pct, 2),
-                "weekly_pnl_pct": round(self.weekly_pnl_pct, 2),
-                "drawdown_pct": round(self.drawdown_pct, 2),
-            },
-            "thresholds_hit": self.thresholds_hit,
-            "recovery_time": self.recovery_time.isoformat() if self.recovery_time else None,
-            "requires_manual_reset": self.requires_manual_reset,
-        }
-
-
-@dataclass
-class DailyStats:
-    """Daily trading statistics."""
-    date: date
-    starting_equity: float
-    current_equity: float
-    high_water_mark: float
-    pnl: float
-    pnl_pct: float
-    trades_taken: int
-    winners: int
-    losers: int
+def _tomorrow_utc(from_date: date) -> datetime:
+    """Tomorrow 00:00 UTC."""
+    t = from_date + timedelta(days=1)
+    return datetime(t.year, t.month, t.day, 0, 0, 0, tzinfo=UTC)
 
 
 class SmartCircuitBreaker:
     """
-    Smart circuit breaker system.
+    Loss-based circuit breaker that protects capital.
 
-    Protects capital with loss-based triggers.
-    NO profit caps - only downside protection.
+    KEY PRINCIPLE: Only triggers on losses, NEVER caps profits.
+
+    Graduated response:
+    1. WARNING: Alert but continue trading
+    2. REDUCED: Trade at 50% size
+    3. DAILY_STOP: No new trades today
+    4. WEEKLY_STOP: No new trades this week
+    5. FULL_STOP: Complete halt, manual review required
     """
 
-    def __init__(
-        self,
-        # Daily limits
-        daily_warning: float = -1.5,
-        daily_reduce: float = -2.0,
-        daily_stop: float = -3.0,
+    def __init__(self, settings=None):
+        self.settings = settings or get_settings()
 
-        # Weekly limits
-        weekly_warning: float = -4.0,
-        weekly_stop: float = -6.0,
+        # Thresholds (all negative values)
+        self.daily_loss_warning = getattr(self.settings, "daily_loss_warning", -1.5)
+        self.daily_loss_reduce = getattr(self.settings, "daily_loss_reduce", -2.0)
+        self.daily_loss_stop = getattr(self.settings, "daily_loss_stop", -3.0)
+        self.weekly_loss_stop = getattr(self.settings, "weekly_loss_stop", -6.0)
+        self.max_drawdown = getattr(self.settings, "max_drawdown", -10.0)
 
-        # Drawdown limits
-        drawdown_warning: float = -7.5,
-        drawdown_stop: float = -10.0,
+        # State tracking (sticky stops)
+        self._current_status = CircuitBreakerStatus.CLEAR
+        self._triggered_at: Optional[datetime] = None
+        self._daily_stop_date: Optional[date] = None
+        self._weekly_stop_date: Optional[date] = None  # Monday of week when we stopped
+        self._lock = threading.RLock()
 
-        # Size reduction when triggered
-        reduced_size_multiplier: float = 0.5,
-
-        # Auto-reset behavior
-        auto_reset_daily: bool = True,
-        auto_reset_weekly: bool = True,
-    ):
-        """
-        Initialize circuit breaker.
-
-        Args:
-            daily_warning: Daily loss % that triggers warning
-            daily_reduce: Daily loss % that triggers size reduction
-            daily_stop: Daily loss % that stops trading for day
-            weekly_warning: Weekly loss % that triggers warning
-            weekly_stop: Weekly loss % that stops trading for week
-            drawdown_warning: Drawdown % that triggers warning
-            drawdown_stop: Drawdown % that triggers full stop
-            reduced_size_multiplier: Size multiplier when in reduced mode
-            auto_reset_daily: Auto-reset daily breakers at start of day
-            auto_reset_weekly: Auto-reset weekly breakers at start of week
-        """
-        # Daily thresholds
-        self.daily_warning = daily_warning
-        self.daily_reduce = daily_reduce
-        self.daily_stop = daily_stop
-
-        # Weekly thresholds
-        self.weekly_warning = weekly_warning
-        self.weekly_stop = weekly_stop
-
-        # Drawdown thresholds
-        self.drawdown_warning = drawdown_warning
-        self.drawdown_stop = drawdown_stop
-
-        # Behavior
-        self.reduced_size_multiplier = reduced_size_multiplier
-        self.auto_reset_daily = auto_reset_daily
-        self.auto_reset_weekly = auto_reset_weekly
-
-        # State tracking
-        self.is_manually_stopped = False
-        self.manual_stop_reason = ""
-        self.last_check_time = None
-
-        # History
-        self.daily_stats: Dict[date, DailyStats] = {}
-        self.breaker_history: List[Dict] = []
-
-    def check(
+    def check_status(
         self,
         daily_pnl_pct: float,
         weekly_pnl_pct: float,
         drawdown_pct: float,
-        current_time: datetime = None
-    ) -> BreakerState:
+    ) -> CircuitBreakerState:
         """
-        Check all circuit breakers and return current state.
+        Check circuit breaker status based on current P&L.
 
         Args:
             daily_pnl_pct: Today's P&L as percentage (negative for loss)
             weekly_pnl_pct: This week's P&L as percentage
-            drawdown_pct: Current drawdown from peak (negative)
-            current_time: Current timestamp (for logging)
+            drawdown_pct: Current drawdown from peak (negative value)
 
         Returns:
-            BreakerState with status, action, and whether trading allowed
+            CircuitBreakerState with status, can_trade, size_multiplier, message
         """
-        current_time = current_time or datetime.now()
-        self.last_check_time = current_time
+        now = datetime.now(UTC)
+        today = now.date()
 
-        thresholds_hit = []
+        with self._lock:
+            # 1. FULL_STOP (sticky until force_reset)
+            if self._current_status == CircuitBreakerStatus.FULL_STOP:
+                logger.info(
+                    "Circuit breaker status check: FULL_STOP (manual reset required)"
+                )
+                return CircuitBreakerState(
+                    status=CircuitBreakerStatus.FULL_STOP,
+                    can_trade=False,
+                    size_multiplier=0.0,
+                    daily_pnl_pct=daily_pnl_pct,
+                    weekly_pnl_pct=weekly_pnl_pct,
+                    drawdown_pct=drawdown_pct,
+                    message="Max drawdown limit hit. Full stop - manual review required.",
+                    triggered_at=self._triggered_at,
+                    resume_at=None,
+                )
 
-        # Check for manual stop first
-        if self.is_manually_stopped:
-            return BreakerState(
-                status=BreakerStatus.FULL_STOP,
-                action=BreakerAction.FULL_SHUTDOWN,
-                can_trade=False,
-                size_multiplier=0,
-                reason=f"Manual stop: {self.manual_stop_reason}",
-                daily_pnl_pct=daily_pnl_pct,
-                weekly_pnl_pct=weekly_pnl_pct,
-                drawdown_pct=drawdown_pct,
-                thresholds_hit=["manual_stop"],
-                requires_manual_reset=True,
-            )
+            # 2. WEEKLY_STOP (sticky until reset_weekly)
+            if self._weekly_stop_date is not None:
+                if _monday_of_week(today) == self._weekly_stop_date:
+                    resume = _next_monday_utc(today)
+                    logger.info(
+                        "Circuit breaker status check: WEEKLY_STOP (resume %s)",
+                        resume.isoformat(),
+                    )
+                    return CircuitBreakerState(
+                        status=CircuitBreakerStatus.WEEKLY_STOP,
+                        can_trade=False,
+                        size_multiplier=0.0,
+                        daily_pnl_pct=daily_pnl_pct,
+                        weekly_pnl_pct=weekly_pnl_pct,
+                        drawdown_pct=drawdown_pct,
+                        message=f"Weekly loss {weekly_pnl_pct:.2f}% exceeds limit. Trading halted until next week.",
+                        triggered_at=self._triggered_at,
+                        resume_at=resume,
+                    )
 
-        # Check drawdown (most severe)
-        if drawdown_pct <= self.drawdown_stop:
-            thresholds_hit.append(f"drawdown_stop ({drawdown_pct:.1f}% <= {self.drawdown_stop}%)")
-            self._log_breaker_event("DRAWDOWN_STOP", drawdown_pct, current_time)
-            return BreakerState(
-                status=BreakerStatus.FULL_STOP,
-                action=BreakerAction.CLOSE_ALL,
-                can_trade=False,
-                size_multiplier=0,
-                reason=f"Max drawdown hit: {drawdown_pct:.1f}%",
-                daily_pnl_pct=daily_pnl_pct,
-                weekly_pnl_pct=weekly_pnl_pct,
-                drawdown_pct=drawdown_pct,
-                thresholds_hit=thresholds_hit,
-                requires_manual_reset=True,
-            )
+            # 3. DAILY_STOP (sticky until reset_daily)
+            if self._daily_stop_date is not None and self._daily_stop_date == today:
+                resume = _tomorrow_utc(today)
+                logger.info(
+                    "Circuit breaker status check: DAILY_STOP (resume %s)",
+                    resume.isoformat(),
+                )
+                return CircuitBreakerState(
+                    status=CircuitBreakerStatus.DAILY_STOP,
+                    can_trade=False,
+                    size_multiplier=0.0,
+                    daily_pnl_pct=daily_pnl_pct,
+                    weekly_pnl_pct=weekly_pnl_pct,
+                    drawdown_pct=drawdown_pct,
+                    message=f"Daily loss {daily_pnl_pct:.2f}% exceeds limit. Trading halted for today.",
+                    triggered_at=self._triggered_at,
+                    resume_at=resume,
+                )
 
-        if drawdown_pct <= self.drawdown_warning:
-            thresholds_hit.append(f"drawdown_warning ({drawdown_pct:.1f}%)")
+            # Clear sticky daily/weekly if we're past the date (safety; normally reset_* is called)
+            if self._daily_stop_date is not None and self._daily_stop_date < today:
+                self._daily_stop_date = None
+            if self._weekly_stop_date is not None and _monday_of_week(today) != self._weekly_stop_date:
+                self._weekly_stop_date = None
 
-        # Check weekly loss
-        if weekly_pnl_pct <= self.weekly_stop:
-            thresholds_hit.append(f"weekly_stop ({weekly_pnl_pct:.1f}% <= {self.weekly_stop}%)")
-            self._log_breaker_event("WEEKLY_STOP", weekly_pnl_pct, current_time)
+            # 4. Evaluate from current PnL (severity order: worst first)
 
-            # Calculate recovery time (next Monday)
-            days_until_monday = (7 - current_time.weekday()) % 7
-            if days_until_monday == 0:
-                days_until_monday = 7
-            recovery = current_time + timedelta(days=days_until_monday)
-            recovery = recovery.replace(hour=0, minute=0, second=0, microsecond=0)
+            # FULL_STOP: drawdown
+            if drawdown_pct <= self.max_drawdown:
+                prev = self._current_status
+                self._current_status = CircuitBreakerStatus.FULL_STOP
+                self._triggered_at = now
+                if prev != CircuitBreakerStatus.FULL_STOP:
+                    logger.warning(
+                        "Circuit breaker: FULL_STOP - drawdown %.2f%% <= %.2f%%",
+                        drawdown_pct,
+                        self.max_drawdown,
+                    )
+                return CircuitBreakerState(
+                    status=CircuitBreakerStatus.FULL_STOP,
+                    can_trade=False,
+                    size_multiplier=0.0,
+                    daily_pnl_pct=daily_pnl_pct,
+                    weekly_pnl_pct=weekly_pnl_pct,
+                    drawdown_pct=drawdown_pct,
+                    message=f"Max drawdown {drawdown_pct:.2f}% hit. Full stop - manual review required.",
+                    triggered_at=self._triggered_at,
+                    resume_at=None,
+                )
 
-            return BreakerState(
-                status=BreakerStatus.WEEKLY_STOP,
-                action=BreakerAction.STOP_NEW_TRADES,
-                can_trade=False,
-                size_multiplier=0,
-                reason=f"Weekly loss limit hit: {weekly_pnl_pct:.1f}%",
-                daily_pnl_pct=daily_pnl_pct,
-                weekly_pnl_pct=weekly_pnl_pct,
-                drawdown_pct=drawdown_pct,
-                thresholds_hit=thresholds_hit,
-                recovery_time=recovery,
-                requires_manual_reset=not self.auto_reset_weekly,
-            )
+            # WEEKLY_STOP: weekly loss
+            if weekly_pnl_pct <= self.weekly_loss_stop:
+                prev = self._current_status
+                self._current_status = CircuitBreakerStatus.WEEKLY_STOP
+                self._triggered_at = now
+                self._weekly_stop_date = _monday_of_week(today)
+                if prev != CircuitBreakerStatus.WEEKLY_STOP:
+                    logger.warning(
+                        "Circuit breaker: WEEKLY_STOP - weekly loss %.2f%% <= %.2f%%",
+                        weekly_pnl_pct,
+                        self.weekly_loss_stop,
+                    )
+                resume = _next_monday_utc(today)
+                return CircuitBreakerState(
+                    status=CircuitBreakerStatus.WEEKLY_STOP,
+                    can_trade=False,
+                    size_multiplier=0.0,
+                    daily_pnl_pct=daily_pnl_pct,
+                    weekly_pnl_pct=weekly_pnl_pct,
+                    drawdown_pct=drawdown_pct,
+                    message=f"Weekly loss {weekly_pnl_pct:.2f}% exceeds limit. Trading halted until next week.",
+                    triggered_at=self._triggered_at,
+                    resume_at=resume,
+                )
 
-        if weekly_pnl_pct <= self.weekly_warning:
-            thresholds_hit.append(f"weekly_warning ({weekly_pnl_pct:.1f}%)")
+            # DAILY_STOP: daily loss
+            if daily_pnl_pct <= self.daily_loss_stop:
+                prev = self._current_status
+                self._current_status = CircuitBreakerStatus.DAILY_STOP
+                self._triggered_at = now
+                self._daily_stop_date = today
+                if prev != CircuitBreakerStatus.DAILY_STOP:
+                    logger.warning(
+                        "Circuit breaker: DAILY_STOP - daily loss %.2f%% <= %.2f%%",
+                        daily_pnl_pct,
+                        self.daily_loss_stop,
+                    )
+                resume = _tomorrow_utc(today)
+                return CircuitBreakerState(
+                    status=CircuitBreakerStatus.DAILY_STOP,
+                    can_trade=False,
+                    size_multiplier=0.0,
+                    daily_pnl_pct=daily_pnl_pct,
+                    weekly_pnl_pct=weekly_pnl_pct,
+                    drawdown_pct=drawdown_pct,
+                    message=f"Daily loss {daily_pnl_pct:.2f}% exceeds limit. Trading halted for today.",
+                    triggered_at=self._triggered_at,
+                    resume_at=resume,
+                )
 
-        # Check daily loss
-        if daily_pnl_pct <= self.daily_stop:
-            thresholds_hit.append(f"daily_stop ({daily_pnl_pct:.1f}% <= {self.daily_stop}%)")
-            self._log_breaker_event("DAILY_STOP", daily_pnl_pct, current_time)
+            # REDUCED: daily loss reduce threshold
+            if daily_pnl_pct <= self.daily_loss_reduce:
+                return CircuitBreakerState(
+                    status=CircuitBreakerStatus.REDUCED,
+                    can_trade=True,
+                    size_multiplier=0.5,
+                    daily_pnl_pct=daily_pnl_pct,
+                    weekly_pnl_pct=weekly_pnl_pct,
+                    drawdown_pct=drawdown_pct,
+                    message=f"Daily loss {daily_pnl_pct:.2f}% - trading at 50% size.",
+                    triggered_at=None,
+                    resume_at=None,
+                )
 
-            # Recovery tomorrow
-            recovery = current_time + timedelta(days=1)
-            recovery = recovery.replace(hour=0, minute=0, second=0, microsecond=0)
+            # WARNING: daily loss warning threshold
+            if daily_pnl_pct <= self.daily_loss_warning:
+                return CircuitBreakerState(
+                    status=CircuitBreakerStatus.WARNING,
+                    can_trade=True,
+                    size_multiplier=0.75,
+                    daily_pnl_pct=daily_pnl_pct,
+                    weekly_pnl_pct=weekly_pnl_pct,
+                    drawdown_pct=drawdown_pct,
+                    message=f"Daily loss {daily_pnl_pct:.2f}% - warning level. Trade with caution.",
+                    triggered_at=None,
+                    resume_at=None,
+                )
 
-            return BreakerState(
-                status=BreakerStatus.DAILY_STOP,
-                action=BreakerAction.STOP_NEW_TRADES,
-                can_trade=False,
-                size_multiplier=0,
-                reason=f"Daily loss limit hit: {daily_pnl_pct:.1f}%",
-                daily_pnl_pct=daily_pnl_pct,
-                weekly_pnl_pct=weekly_pnl_pct,
-                drawdown_pct=drawdown_pct,
-                thresholds_hit=thresholds_hit,
-                recovery_time=recovery,
-                requires_manual_reset=not self.auto_reset_daily,
-            )
-
-        if daily_pnl_pct <= self.daily_reduce:
-            thresholds_hit.append(f"daily_reduce ({daily_pnl_pct:.1f}% <= {self.daily_reduce}%)")
-            self._log_breaker_event("DAILY_REDUCE", daily_pnl_pct, current_time)
-
-            return BreakerState(
-                status=BreakerStatus.REDUCED,
-                action=BreakerAction.REDUCE_SIZE,
-                can_trade=True,
-                size_multiplier=self.reduced_size_multiplier,
-                reason=f"Daily loss warning: reducing size to {self.reduced_size_multiplier*100:.0f}%",
-                daily_pnl_pct=daily_pnl_pct,
-                weekly_pnl_pct=weekly_pnl_pct,
-                drawdown_pct=drawdown_pct,
-                thresholds_hit=thresholds_hit,
-            )
-
-        if daily_pnl_pct <= self.daily_warning:
-            thresholds_hit.append(f"daily_warning ({daily_pnl_pct:.1f}%)")
-
-            return BreakerState(
-                status=BreakerStatus.WARNING,
-                action=BreakerAction.ALERT,
+            # CLEAR
+            self._current_status = CircuitBreakerStatus.CLEAR
+            return CircuitBreakerState(
+                status=CircuitBreakerStatus.CLEAR,
                 can_trade=True,
                 size_multiplier=1.0,
-                reason=f"Daily loss warning: {daily_pnl_pct:.1f}%",
                 daily_pnl_pct=daily_pnl_pct,
                 weekly_pnl_pct=weekly_pnl_pct,
                 drawdown_pct=drawdown_pct,
-                thresholds_hit=thresholds_hit,
+                message="All clear. No loss limits triggered.",
+                triggered_at=None,
+                resume_at=None,
             )
 
-        # All clear
-        return BreakerState(
-            status=BreakerStatus.CLEAR,
-            action=BreakerAction.CONTINUE,
-            can_trade=True,
-            size_multiplier=1.0,
-            reason="All systems clear",
-            daily_pnl_pct=daily_pnl_pct,
-            weekly_pnl_pct=weekly_pnl_pct,
-            drawdown_pct=drawdown_pct,
-            thresholds_hit=thresholds_hit,
-        )
+    def reset_daily(self) -> None:
+        """Reset daily stop at start of new trading day."""
+        with self._lock:
+            if self._current_status == CircuitBreakerStatus.DAILY_STOP:
+                logger.warning("Circuit breaker: reset_daily() - clearing DAILY_STOP")
+            self._daily_stop_date = None
+            if self._current_status == CircuitBreakerStatus.DAILY_STOP:
+                self._current_status = CircuitBreakerStatus.CLEAR
+                self._triggered_at = None
 
-    def manual_stop(self, reason: str):
-        """Manually trigger a full stop."""
-        self.is_manually_stopped = True
-        self.manual_stop_reason = reason
-        self._log_breaker_event("MANUAL_STOP", 0, datetime.now())
+    def reset_weekly(self) -> None:
+        """Reset weekly stop at start of new trading week."""
+        with self._lock:
+            if self._current_status == CircuitBreakerStatus.WEEKLY_STOP:
+                logger.warning("Circuit breaker: reset_weekly() - clearing WEEKLY_STOP")
+            self._weekly_stop_date = None
+            if self._current_status == CircuitBreakerStatus.WEEKLY_STOP:
+                self._current_status = CircuitBreakerStatus.CLEAR
+                self._triggered_at = None
 
-    def manual_reset(self):
-        """Reset manual stop (requires human intervention)."""
-        self.is_manually_stopped = False
-        self.manual_stop_reason = ""
-        self._log_breaker_event("MANUAL_RESET", 0, datetime.now())
+    def force_reset(self) -> None:
+        """Manual reset (requires explicit action). Clears FULL_STOP and sticky state."""
+        with self._lock:
+            if self._current_status == CircuitBreakerStatus.FULL_STOP:
+                logger.warning("Circuit breaker: force_reset() - clearing FULL_STOP")
+            self._current_status = CircuitBreakerStatus.CLEAR
+            self._triggered_at = None
+            self._daily_stop_date = None
+            self._weekly_stop_date = None
 
-    def _log_breaker_event(self, event_type: str, value: float, timestamp: datetime):
-        """Log a circuit breaker event."""
-        self.breaker_history.append({
-            "event": event_type,
-            "value": value,
-            "timestamp": timestamp.isoformat(),
-        })
-        # Keep last 100 events
-        if len(self.breaker_history) > 100:
-            self.breaker_history = self.breaker_history[-100:]
-
-    def get_thresholds(self) -> Dict:
-        """Get all threshold settings."""
+    def get_thresholds(self) -> dict:
+        """Return all threshold values for display/logging."""
         return {
-            "daily": {
-                "warning": self.daily_warning,
-                "reduce": self.daily_reduce,
-                "stop": self.daily_stop,
-            },
-            "weekly": {
-                "warning": self.weekly_warning,
-                "stop": self.weekly_stop,
-            },
-            "drawdown": {
-                "warning": self.drawdown_warning,
-                "stop": self.drawdown_stop,
-            },
-            "reduced_size_multiplier": self.reduced_size_multiplier,
+            "daily_loss_warning": self.daily_loss_warning,
+            "daily_loss_reduce": self.daily_loss_reduce,
+            "daily_loss_stop": self.daily_loss_stop,
+            "weekly_loss_stop": self.weekly_loss_stop,
+            "max_drawdown": self.max_drawdown,
         }
-
-    def get_history(self, limit: int = 20) -> List[Dict]:
-        """Get recent breaker events."""
-        return self.breaker_history[-limit:]
-
-
-# Test the circuit breaker
-if __name__ == "__main__":
-    print("=" * 60)
-    print("NEXUS SMART CIRCUIT BREAKER TEST")
-    print("=" * 60)
-
-    breaker = SmartCircuitBreaker(
-        daily_warning=-1.5,
-        daily_reduce=-2.0,
-        daily_stop=-3.0,
-        weekly_warning=-4.0,
-        weekly_stop=-6.0,
-        drawdown_warning=-7.5,
-        drawdown_stop=-10.0,
-    )
-
-    # Test 1: All clear
-    print("\n--- Test 1: All Clear ---")
-    state = breaker.check(
-        daily_pnl_pct=0.5,
-        weekly_pnl_pct=2.0,
-        drawdown_pct=-3.0
-    )
-    print(f"Status: {state.status.value}")
-    print(f"Can trade: {state.can_trade}")
-    print(f"Size multiplier: {state.size_multiplier}x")
-    print(f"Reason: {state.reason}")
-
-    # Test 2: Daily warning
-    print("\n--- Test 2: Daily Warning (-1.5%) ---")
-    state = breaker.check(
-        daily_pnl_pct=-1.5,
-        weekly_pnl_pct=-1.0,
-        drawdown_pct=-3.0
-    )
-    print(f"Status: {state.status.value}")
-    print(f"Can trade: {state.can_trade}")
-    print(f"Action: {state.action.value}")
-    print(f"Thresholds hit: {state.thresholds_hit}")
-
-    # Test 3: Daily reduce
-    print("\n--- Test 3: Daily Reduce (-2.0%) ---")
-    state = breaker.check(
-        daily_pnl_pct=-2.0,
-        weekly_pnl_pct=-2.0,
-        drawdown_pct=-4.0
-    )
-    print(f"Status: {state.status.value}")
-    print(f"Can trade: {state.can_trade}")
-    print(f"Size multiplier: {state.size_multiplier}x")
-    print(f"Reason: {state.reason}")
-
-    # Test 4: Daily stop
-    print("\n--- Test 4: Daily Stop (-3.0%) ---")
-    state = breaker.check(
-        daily_pnl_pct=-3.0,
-        weekly_pnl_pct=-3.0,
-        drawdown_pct=-5.0
-    )
-    print(f"Status: {state.status.value}")
-    print(f"Can trade: {state.can_trade}")
-    print(f"Action: {state.action.value}")
-    print(f"Recovery time: {state.recovery_time}")
-
-    # Test 5: Weekly stop
-    print("\n--- Test 5: Weekly Stop (-6.0%) ---")
-    state = breaker.check(
-        daily_pnl_pct=-1.0,
-        weekly_pnl_pct=-6.0,
-        drawdown_pct=-7.0
-    )
-    print(f"Status: {state.status.value}")
-    print(f"Can trade: {state.can_trade}")
-    print(f"Recovery time: {state.recovery_time}")
-    print(f"Requires manual reset: {state.requires_manual_reset}")
-
-    # Test 6: Max drawdown (full stop)
-    print("\n--- Test 6: Max Drawdown Stop (-10%) ---")
-    state = breaker.check(
-        daily_pnl_pct=-2.0,
-        weekly_pnl_pct=-5.0,
-        drawdown_pct=-10.0
-    )
-    print(f"Status: {state.status.value}")
-    print(f"Can trade: {state.can_trade}")
-    print(f"Action: {state.action.value}")
-    print(f"Requires manual reset: {state.requires_manual_reset}")
-
-    # Test 7: Manual stop
-    print("\n--- Test 7: Manual Stop ---")
-    breaker.manual_stop("Testing emergency shutdown")
-    state = breaker.check(
-        daily_pnl_pct=1.0,
-        weekly_pnl_pct=5.0,
-        drawdown_pct=-2.0
-    )
-    print(f"Status: {state.status.value}")
-    print(f"Can trade: {state.can_trade}")
-    print(f"Reason: {state.reason}")
-
-    # Reset manual stop
-    breaker.manual_reset()
-
-    # Test 8: Display thresholds
-    print("\n--- Test 8: Threshold Settings ---")
-    thresholds = breaker.get_thresholds()
-    print(f"Daily: warning={thresholds['daily']['warning']}%, reduce={thresholds['daily']['reduce']}%, stop={thresholds['daily']['stop']}%")
-    print(f"Weekly: warning={thresholds['weekly']['warning']}%, stop={thresholds['weekly']['stop']}%")
-    print(f"Drawdown: warning={thresholds['drawdown']['warning']}%, stop={thresholds['drawdown']['stop']}%")
-
-    # Test 9: History
-    print("\n--- Test 9: Breaker History ---")
-    history = breaker.get_history(5)
-    print(f"Recent events: {len(history)}")
-    for event in history[-3:]:
-        print(f"  {event['event']} at {event['timestamp']}")
-
-    print("\n" + "=" * 60)
-    print("CIRCUIT BREAKER TEST COMPLETE [OK]")
-    print("=" * 60)

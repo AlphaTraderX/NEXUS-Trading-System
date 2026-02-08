@@ -1,387 +1,232 @@
 """
-NEXUS Cost Engine
-Calculates true trading costs including spread, commission, slippage, overnight, and FX.
-
-This is what separates profitable from unprofitable traders.
-Most retail traders IGNORE these costs and wonder why they lose.
+NEXUS Cost Engine — Phase 5.1
+Calculates true trading costs for each opportunity (spread, commission, slippage, overnight, FX).
 """
 
 from dataclasses import dataclass
-from typing import Dict, Optional
-from enum import Enum
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from typing import Any, Dict, List
 
-from nexus.core.enums import Market
+from nexus.core.enums import EdgeType, Market
+from nexus.core.models import Opportunity
 
 
 @dataclass
 class CostBreakdown:
-    """Breakdown of all costs for a trade."""
-    spread: float = 0.0          # Spread cost as % (round trip)
-    commission: float = 0.0      # Commission as %
-    slippage: float = 0.0        # Expected slippage as %
-    overnight: float = 0.0       # Overnight financing cost as %
-    fx_conversion: float = 0.0   # FX conversion cost as %
-    other: float = 0.0           # Any other costs
+    """Breakdown of all cost components for a trade (all values as decimals, e.g. 0.02 = 0.02%)."""
+
+    spread: float = 0.0       # percentage, round trip
+    commission: float = 0.0   # percentage of position value
+    slippage: float = 0.0     # percentage, round trip
+    overnight: float = 0.0    # percentage per day
+    fx_conversion: float = 0.0
+    other: float = 0.0
 
     @property
     def total(self) -> float:
-        """Total costs as percentage."""
-        return self.spread + self.commission + self.slippage + self.overnight + self.fx_conversion + self.other
+        """Sum of all cost components (as percentage)."""
+        return (
+            self.spread
+            + self.commission
+            + self.slippage
+            + self.overnight
+            + self.fx_conversion
+            + self.other
+        )
 
     def to_dict(self) -> dict:
+        """Serialize to dict for storage/API."""
         return {
-            "spread": round(self.spread, 4),
-            "commission": round(self.commission, 4),
-            "slippage": round(self.slippage, 4),
-            "overnight": round(self.overnight, 4),
-            "fx_conversion": round(self.fx_conversion, 4),
-            "other": round(self.other, 4),
-            "total": round(self.total, 4)
+            "spread": self.spread,
+            "commission": self.commission,
+            "slippage": self.slippage,
+            "overnight": self.overnight,
+            "fx_conversion": self.fx_conversion,
+            "other": self.other,
+            "total": self.total,
         }
 
 
 class CostEngine:
-    """
-    Calculate TRUE costs for each trade.
+    """Calculate true trading costs for opportunities."""
 
-    BROKER COSTS vary by broker:
-    - IBKR: Low commission, tight spreads
-    - IG: Spread betting (wider spreads, no commission, TAX FREE)
-    - OANDA: Forex specialist, tight forex spreads
-
-    MARKET COSTS vary by asset class:
-    - US Stocks: Tightest spreads, lowest costs
-    - Forex Majors: Very tight, but overnight costs
-    - UK Stocks: Higher spreads than US
-    - Futures: Low costs, no overnight
-    """
-
-    # Broker-specific costs
-    BROKER_COSTS = {
+    BROKER_COSTS: Dict[str, Dict[str, float]] = {
         "ibkr": {
-            "commission_per_trade": 0.35,      # USD per trade
-            "commission_per_share": 0.005,     # USD per share
-            "min_commission": 0.35,
-            "fx_conversion": 0.00002,          # 0.002% for FX
-            "spread_markup": 1.0,              # No markup on spreads
+            "commission_per_trade": 0.35,
+            "commission_per_share": 0.005,
+            "fx_conversion_pct": 0.00002,
         },
         "ig": {
-            "commission_per_trade": 0,         # Spread betting = no commission
-            "spread_markup": 1.2,              # 20% wider spreads (cost is in spread)
-            "fx_conversion": 0,                # No FX cost (spread betting)
+            "commission_per_trade": 0,
+            "spread_markup": 1.2,
+            "fx_conversion_pct": 0,
         },
         "oanda": {
-            "commission_per_trade": 0,         # No commission
-            "spread_markup": 1.0,              # Tight spreads
-            "fx_conversion": 0,                # Native forex
-        },
-        "alpaca": {
-            "commission_per_trade": 0,         # Commission free
+            "commission_per_trade": 0,
             "spread_markup": 1.0,
-            "fx_conversion": 0.001,            # 0.1% for non-USD accounts
-        }
+            "fx_conversion_pct": 0,
+        },
+        "polygon": {
+            "commission_per_trade": 0.35,
+            "commission_per_share": 0.005,
+            "fx_conversion_pct": 0.00002,
+        },
     }
 
-    # Market-specific base costs (as percentages)
-    MARKET_COSTS = {
+    MARKET_COSTS: Dict[Market, Dict[str, float]] = {
         Market.US_STOCKS: {
-            "spread": 0.02,        # 0.02% typical spread
-            "slippage": 0.02,      # 0.02% expected slippage
-            "overnight": 0.02,    # 0.02% per day financing
+            "spread_pct": 0.02,
+            "slippage_pct": 0.02,
+            "overnight_pct": 0.02,
         },
         Market.UK_STOCKS: {
-            "spread": 0.08,        # Wider spreads in UK
-            "slippage": 0.03,
-            "overnight": 0.02,
-        },
-        Market.EU_STOCKS: {
-            "spread": 0.06,
-            "slippage": 0.03,
-            "overnight": 0.02,
+            "spread_pct": 0.08,
+            "slippage_pct": 0.03,
+            "overnight_pct": 0.02,
         },
         Market.FOREX_MAJORS: {
-            "spread": 0.015,       # Very tight
-            "slippage": 0.01,
-            "overnight": 0.01,    # Swap rates vary
+            "spread_pct": 0.015,
+            "slippage_pct": 0.01,
+            "overnight_pct": 0.01,
         },
         Market.FOREX_CROSSES: {
-            "spread": 0.025,
-            "slippage": 0.015,
-            "overnight": 0.015,
+            "spread_pct": 0.025,
+            "slippage_pct": 0.015,
+            "overnight_pct": 0.015,
         },
         Market.US_FUTURES: {
-            "spread": 0.01,
-            "slippage": 0.01,
-            "overnight": 0,        # No overnight cost
+            "spread_pct": 0.01,
+            "slippage_pct": 0.01,
+            "overnight_pct": 0,
         },
         Market.COMMODITIES: {
-            "spread": 0.02,
-            "slippage": 0.015,
-            "overnight": 0,
+            "spread_pct": 0.02,
+            "slippage_pct": 0.015,
+            "overnight_pct": 0,
         },
     }
 
-    # Default market costs for unknown markets
-    DEFAULT_MARKET_COSTS = {
-        "spread": 0.05,
-        "slippage": 0.03,
-        "overnight": 0.02,
+    EDGE_ESTIMATES: Dict[EdgeType, float] = {
+        EdgeType.INSIDER_CLUSTER: 0.35,
+        EdgeType.VWAP_DEVIATION: 0.18,
+        EdgeType.TURN_OF_MONTH: 0.30,
+        EdgeType.MONTH_END: 0.20,
+        EdgeType.GAP_FILL: 0.18,
+        EdgeType.RSI_EXTREME: 0.15,
+        EdgeType.POWER_HOUR: 0.12,
+        EdgeType.ASIAN_RANGE: 0.12,
+        EdgeType.ORB: 0.15,
+        EdgeType.BOLLINGER_TOUCH: 0.12,
+        EdgeType.LONDON_OPEN: 0.12,
+        EdgeType.NY_OPEN: 0.12,
+        EdgeType.EARNINGS_DRIFT: 0.20,
     }
-
-    def __init__(self, default_broker: str = "ibkr"):
-        """Initialize with default broker."""
-        self.default_broker = default_broker
 
     def calculate_costs(
         self,
         symbol: str,
         market: Market,
-        broker: str = None,
-        position_value: float = 1000.0,
+        broker: str,
+        position_value: float,
         hold_days: float = 1.0,
-        shares: int = None
     ) -> CostBreakdown:
         """
-        Calculate all costs for a trade.
+        Compute full cost breakdown for a trade.
 
-        Args:
-            symbol: Trading symbol
-            market: Market enum (US_STOCKS, FOREX_MAJORS, etc.)
-            broker: Broker name (ibkr, ig, oanda, alpaca)
-            position_value: Total position value in base currency
-            hold_days: Expected holding period in days
-            shares: Number of shares (for per-share commission)
-
-        Returns:
-            CostBreakdown with all costs as percentages
+        Uses MARKET_COSTS for base rates, BROKER_COSTS for broker markup.
+        Spread and slippage are round trip (entry + exit). Overnight scales by hold_days.
         """
-        broker = broker or self.default_broker
-        broker_config = self.BROKER_COSTS.get(broker, self.BROKER_COSTS["ibkr"])
-        market_config = self.MARKET_COSTS.get(market, self.DEFAULT_MARKET_COSTS)
+        base = self.MARKET_COSTS.get(market)
+        if not base:
+            base = {"spread_pct": 0.05, "slippage_pct": 0.03, "overnight_pct": 0.02}
 
-        # Spread (round trip = entry + exit)
-        spread_markup = broker_config.get("spread_markup", 1.0)
-        spread = market_config["spread"] * spread_markup * 2  # Round trip
+        broker_cfg = self.BROKER_COSTS.get(broker, self.BROKER_COSTS["ibkr"])
+        spread_markup = broker_cfg.get("spread_markup", 1.0)
 
-        # Commission
-        commission_fixed = broker_config.get("commission_per_trade", 0) * 2  # Round trip
-        commission_per_share = broker_config.get("commission_per_share", 0)
+        # Spread: round trip (×2)
+        spread = base["spread_pct"] * spread_markup * 2
 
-        if shares and commission_per_share > 0:
-            commission_total = (commission_per_share * shares * 2) + commission_fixed
-        else:
-            commission_total = commission_fixed
+        # Commission as fraction of position value (then we store as decimal %)
+        commission_per_trade = broker_cfg.get("commission_per_trade", 0) * 2  # round trip
+        commission_pct = (commission_per_trade / position_value) if position_value > 0 else 0.0
 
-        # Convert to percentage
-        commission_pct = (commission_total / position_value * 100) if position_value > 0 else 0
+        # Slippage: round trip (×2)
+        slippage = base["slippage_pct"] * 2
 
-        # Slippage (round trip)
-        slippage = market_config["slippage"] * 2
+        # Overnight: daily rate × hold_days
+        overnight = base["overnight_pct"] * hold_days
 
-        # Overnight cost (scales with hold time)
-        overnight = market_config["overnight"] * hold_days
-
-        # FX conversion cost (if trading non-base currency)
-        fx_conversion = broker_config.get("fx_conversion", 0) * 2
+        # FX conversion (e.g. non-GBP instruments)
+        fx_pct = broker_cfg.get("fx_conversion_pct", 0)
+        fx_conversion = fx_pct * 2  # round trip
 
         return CostBreakdown(
             spread=spread,
             commission=commission_pct,
             slippage=slippage,
             overnight=overnight,
-            fx_conversion=fx_conversion
+            fx_conversion=fx_conversion,
+            other=0.0,
         )
 
-    def calculate_net_edge(
-        self,
-        gross_edge: float,
-        costs: CostBreakdown
-    ) -> dict:
+    def calculate_net_edge(self, gross_edge_pct: float, costs: CostBreakdown) -> Dict[str, Any]:
         """
-        Calculate net edge after all costs.
+        Compute net edge after costs and viability.
 
-        This is THE critical calculation. If net edge is negative or tiny,
-        DON'T TAKE THE TRADE.
-
-        Args:
-            gross_edge: Expected gross return as percentage (e.g., 0.35 for 0.35%)
-            costs: CostBreakdown from calculate_costs()
-
-        Returns:
-            {
-                "gross_edge": 0.35,
-                "total_costs": 0.11,
-                "net_edge": 0.24,
-                "cost_ratio": 31.4,  # Costs as % of gross edge
-                "viable": True,
-                "min_edge_for_viability": 0.05,
-                "warnings": []
-            }
+        Returns gross_edge, total_costs, net_edge, cost_ratio, viable flag, and warnings.
         """
-        net_edge = gross_edge - costs.total
-        cost_ratio = (costs.total / gross_edge * 100) if gross_edge > 0 else 100
+        total_costs = costs.total
+        net_edge = gross_edge_pct - total_costs
+        cost_ratio = (total_costs / gross_edge_pct * 100) if gross_edge_pct > 0 else 100.0
 
-        warnings = []
-
-        # Warning thresholds
-        if cost_ratio > 50:
-            warnings.append(f"High cost ratio: costs eat {cost_ratio:.0f}% of gross edge")
-
-        if net_edge < 0.05:
-            warnings.append(f"Low net edge: {net_edge:.3f}% is below minimum 0.05%")
-
-        if costs.spread > 0.10:
-            warnings.append(f"High spread cost: {costs.spread:.2f}%")
-
-        if costs.overnight > 0.05:
-            warnings.append(f"Significant overnight cost: {costs.overnight:.2f}%")
-
-        # Viability check: net edge must be positive and meaningful
         viable = net_edge >= 0.05 and cost_ratio < 70
+        warnings: List[str] = []
+
+        if cost_ratio > 50:
+            warnings.append(f"Costs eat {cost_ratio:.0f}% of edge")
+        if net_edge < 0.05:
+            warnings.append(f"Net edge {net_edge:.2f}% below minimum 0.05%")
+        if net_edge < 0:
+            warnings.append("Trade is UNPROFITABLE after costs")
 
         return {
-            "gross_edge": round(gross_edge, 4),
-            "total_costs": round(costs.total, 4),
-            "net_edge": round(net_edge, 4),
-            "cost_ratio": round(cost_ratio, 2),
+            "gross_edge": gross_edge_pct,
+            "total_costs": total_costs,
+            "net_edge": net_edge,
+            "cost_ratio": cost_ratio,
             "viable": viable,
-            "min_edge_for_viability": 0.05,
             "warnings": warnings,
-            "cost_breakdown": costs.to_dict()
         }
 
-    def get_minimum_edge_for_market(self, market: Market, broker: str = None) -> float:
-        """
-        Get minimum gross edge required for a market to be viable.
+    def get_edge_estimate(self, edge_type: EdgeType) -> float:
+        """Return expected gross edge (as decimal %) for the given edge type."""
+        return self.EDGE_ESTIMATES.get(edge_type, 0.10)
 
-        This helps filter out opportunities that can't overcome costs.
+    def analyze_opportunity(
+        self,
+        opportunity: Opportunity,
+        broker: str,
+        position_value: float,
+        hold_days: float = 1.0,
+    ) -> Dict[str, Any]:
         """
-        # Calculate costs for a typical trade
+        Full analysis: costs, edge estimate, and net edge for an opportunity.
+        """
         costs = self.calculate_costs(
-            symbol="TEST",
-            market=market,
+            symbol=opportunity.symbol,
+            market=opportunity.market,
             broker=broker,
-            position_value=1000,
-            hold_days=1
+            position_value=position_value,
+            hold_days=hold_days,
         )
-
-        # Minimum viable net edge is 0.05%
-        # So minimum gross = costs + 0.05%
-        min_gross = costs.total + 0.05
-
-        # Add buffer for safety
-        return round(min_gross * 1.2, 4)  # 20% buffer
-
-    def compare_brokers(self, market: Market, position_value: float = 1000) -> dict:
-        """
-        Compare costs across brokers for a given market.
-
-        Useful for choosing optimal broker for each market.
-        """
-        comparison = {}
-
-        for broker_name in self.BROKER_COSTS.keys():
-            costs = self.calculate_costs(
-                symbol="TEST",
-                market=market,
-                broker=broker_name,
-                position_value=position_value,
-                hold_days=1
-            )
-            comparison[broker_name] = {
-                "total_cost": round(costs.total, 4),
-                "breakdown": costs.to_dict()
-            }
-
-        # Sort by total cost
-        sorted_brokers = sorted(comparison.items(), key=lambda x: x[1]["total_cost"])
+        gross_edge = self.get_edge_estimate(opportunity.primary_edge)
+        net_analysis = self.calculate_net_edge(gross_edge, costs)
 
         return {
-            "market": market.value if hasattr(market, 'value') else str(market),
-            "position_value": position_value,
-            "brokers_ranked": [b[0] for b in sorted_brokers],
-            "best_broker": sorted_brokers[0][0],
-            "comparison": comparison
+            "opportunity_id": opportunity.id,
+            "symbol": opportunity.symbol,
+            "market": opportunity.market.value if hasattr(opportunity.market, "value") else str(opportunity.market),
+            "primary_edge": opportunity.primary_edge.value if hasattr(opportunity.primary_edge, "value") else str(opportunity.primary_edge),
+            "costs": costs.to_dict(),
+            "gross_edge": gross_edge,
+            **net_analysis,
         }
-
-
-# Test the cost engine
-if __name__ == "__main__":
-    print("=" * 60)
-    print("NEXUS COST ENGINE TEST")
-    print("=" * 60)
-
-    engine = CostEngine(default_broker="ibkr")
-
-    # Test 1: US Stocks with IBKR
-    print("\n--- Test 1: US Stocks (IBKR) ---")
-    costs = engine.calculate_costs(
-        symbol="SPY",
-        market=Market.US_STOCKS,
-        broker="ibkr",
-        position_value=5000,
-        hold_days=1,
-        shares=50
-    )
-    print(f"Cost breakdown: {costs.to_dict()}")
-    print(f"Total costs: {costs.total:.4f}%")
-
-    # Calculate net edge
-    net = engine.calculate_net_edge(gross_edge=0.35, costs=costs)
-    print(f"Gross edge: {net['gross_edge']}%")
-    print(f"Net edge: {net['net_edge']}%")
-    print(f"Cost ratio: {net['cost_ratio']}%")
-    print(f"Viable: {net['viable']}")
-    if net['warnings']:
-        print(f"Warnings: {net['warnings']}")
-
-    # Test 2: Forex with IG (spread betting)
-    print("\n--- Test 2: Forex Majors (IG Spread Betting) ---")
-    costs = engine.calculate_costs(
-        symbol="EUR/USD",
-        market=Market.FOREX_MAJORS,
-        broker="ig",
-        position_value=2000,
-        hold_days=0.5  # Intraday
-    )
-    print(f"Cost breakdown: {costs.to_dict()}")
-
-    net = engine.calculate_net_edge(gross_edge=0.20, costs=costs)
-    print(f"Net edge: {net['net_edge']}%")
-    print(f"Viable: {net['viable']}")
-
-    # Test 3: UK Stocks (higher costs)
-    print("\n--- Test 3: UK Stocks (IBKR) ---")
-    costs = engine.calculate_costs(
-        symbol="BP",
-        market=Market.UK_STOCKS,
-        broker="ibkr",
-        position_value=3000,
-        hold_days=2
-    )
-    print(f"Total costs: {costs.total:.4f}%")
-
-    net = engine.calculate_net_edge(gross_edge=0.25, costs=costs)
-    print(f"Net edge: {net['net_edge']}%")
-    print(f"Viable: {net['viable']}")
-
-    # Test 4: Minimum edge by market
-    print("\n--- Test 4: Minimum Viable Edge by Market ---")
-    for market in [Market.US_STOCKS, Market.UK_STOCKS, Market.FOREX_MAJORS, Market.US_FUTURES]:
-        min_edge = engine.get_minimum_edge_for_market(market)
-        print(f"{market.value}: {min_edge:.4f}% minimum gross edge required")
-
-    # Test 5: Broker comparison
-    print("\n--- Test 5: Broker Comparison for US Stocks ---")
-    comparison = engine.compare_brokers(Market.US_STOCKS, position_value=5000)
-    print(f"Best broker: {comparison['best_broker']}")
-    print(f"Ranking: {comparison['brokers_ranked']}")
-    for broker, data in comparison['comparison'].items():
-        print(f"  {broker}: {data['total_cost']:.4f}% total")
-
-    print("\n" + "=" * 60)
-    print("COST ENGINE TEST COMPLETE [OK]")
-    print("=" * 60)

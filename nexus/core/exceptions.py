@@ -31,3 +31,9 @@ class NexusExecutionError(NexusError):
     """Order or execution error."""
 
     pass
+
+
+class KillSwitchError(NexusError):
+    """Raised when kill switch operation fails."""
+
+    pass

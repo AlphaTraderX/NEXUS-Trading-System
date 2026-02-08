@@ -67,6 +67,7 @@ class RegimeDetector:
             EdgeType.ORB,
             EdgeType.POWER_HOUR,
             EdgeType.NY_OPEN,
+            EdgeType.EARNINGS_DRIFT,
         ],
         MarketRegime.TRENDING_DOWN: [
             EdgeType.VWAP_DEVIATION,

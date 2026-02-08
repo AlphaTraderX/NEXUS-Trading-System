@@ -1,394 +1,491 @@
 """
 NEXUS Database Models
 
-SQLAlchemy models for persistent storage of signals, trades, and metrics.
+SQLAlchemy 2.0 models for persistent storage of signals, trades, and performance data.
+PostgreSQL is the target database; models are compatible with SQLite for testing.
 """
 
-from datetime import datetime
-from typing import Any, Dict, Optional
-from uuid import uuid4
-
+from datetime import datetime, date
+from typing import Optional, List
 from sqlalchemy import (
-    Boolean,
-    Column,
-    DateTime,
-    Float,
-    ForeignKey,
-    Index,
-    Integer,
-    String,
-    Text,
-    func,
+    String, Float, Integer, Boolean, DateTime, Date, JSON,
+    ForeignKey, Index, UniqueConstraint,
+    TypeDecorator, CHAR,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+import uuid
 
-from .database import Base
+
+class GUID(TypeDecorator):
+    """
+    Platform-independent GUID type.
+
+    Uses PostgreSQL's UUID type when available, otherwise uses
+    CHAR(36) storing as stringified UUIDs.
+
+    This allows models to work with both PostgreSQL (production)
+    and SQLite (testing).
+    """
+    impl = CHAR(36)
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == 'postgresql':
+            return dialect.type_descriptor(PG_UUID(as_uuid=True))
+        else:
+            return dialect.type_descriptor(CHAR(36))
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return value
+        elif dialect.name == 'postgresql':
+            return value
+        else:
+            if isinstance(value, uuid.UUID):
+                return str(value)
+            else:
+                return str(uuid.UUID(value))
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return value
+        if isinstance(value, uuid.UUID):
+            return value
+        else:
+            return uuid.UUID(value)
+
+
+class Base(DeclarativeBase):
+    """Base class for all NEXUS database models."""
+    pass
 
 
 # =============================================================================
 # SIGNAL RECORD
 # =============================================================================
 
+
 class SignalRecord(Base):
     """
-    Stores all generated trading signals.
-
-    This is the primary record of every signal NEXUS generates,
-    whether traded or not.
+    Stores every signal NEXUS generates.
     """
-    __tablename__ = "signals"
+    __tablename__ = "signal_records"
 
-    # Primary key
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), primary_key=True, default=uuid.uuid4
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, nullable=False
+    )
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), onupdate=datetime.utcnow
+    )
+    signal_id: Mapped[str] = mapped_column(String(50), unique=True, index=True, nullable=False)
+    opportunity_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(20), index=True, nullable=False)
+    market: Mapped[str] = mapped_column(String(20), nullable=False)
+    direction: Mapped[str] = mapped_column(String(10), nullable=False)
+    entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    stop_loss: Mapped[float] = mapped_column(Float, nullable=False)
+    take_profit: Mapped[float] = mapped_column(Float, nullable=False)
+    position_size: Mapped[float] = mapped_column(Float, nullable=False)
+    position_value: Mapped[float] = mapped_column(Float, nullable=False)
+    risk_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    risk_percent: Mapped[float] = mapped_column(Float, nullable=False)
+    primary_edge: Mapped[str] = mapped_column(String(30), index=True, nullable=False)
+    secondary_edges: Mapped[list] = mapped_column(JSON, default=lambda: [])
+    edge_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    tier: Mapped[str] = mapped_column(String(1), index=True, nullable=False)
+    gross_expected: Mapped[float] = mapped_column(Float, nullable=False)
+    net_expected: Mapped[float] = mapped_column(Float, nullable=False)
+    cost_ratio: Mapped[float] = mapped_column(Float, nullable=False)
+    costs: Mapped[dict] = mapped_column(JSON, nullable=False)
+    ai_reasoning: Mapped[Optional[str]] = mapped_column(String(2000))
+    confluence_factors: Mapped[list] = mapped_column(JSON, default=lambda: [])
+    risk_factors: Mapped[list] = mapped_column(JSON, default=lambda: [])
+    market_context: Mapped[Optional[str]] = mapped_column(String(500))
+    session: Mapped[Optional[str]] = mapped_column(String(20))
+    valid_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(
+        String(20), index=True, nullable=False, default="PENDING"
+    )
+    outcome_entry_price: Mapped[Optional[float]] = mapped_column(Float)
+    outcome_exit_price: Mapped[Optional[float]] = mapped_column(Float)
+    outcome_pnl: Mapped[Optional[float]] = mapped_column(Float)
+    outcome_pnl_percent: Mapped[Optional[float]] = mapped_column(Float)
+    outcome_exit_reason: Mapped[Optional[str]] = mapped_column(String(50))
+    outcome_closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
-    # Timestamps
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-
-    # Signal identification
-    signal_id = Column(String(50), unique=True, nullable=False, index=True)
-    opportunity_id = Column(String(50), nullable=False)
-
-    # Instrument
-    symbol = Column(String(20), nullable=False, index=True)
-    market = Column(String(30), nullable=False, index=True)
-    direction = Column(String(10), nullable=False)
-
-    # Prices
-    entry_price = Column(Float, nullable=False)
-    stop_loss = Column(Float, nullable=False)
-    take_profit = Column(Float, nullable=False)
-
-    # Position sizing
-    position_size = Column(Float, nullable=False)
-    position_value = Column(Float, nullable=False)
-    risk_amount = Column(Float, nullable=False)
-    risk_percent = Column(Float, nullable=False)
-
-    # Edge analysis
-    primary_edge = Column(String(50), nullable=False, index=True)
-    secondary_edges = Column(JSONB, default=list)
-    edge_score = Column(Integer, nullable=False, index=True)
-    tier = Column(String(1), nullable=False, index=True)
-
-    # Cost analysis
-    gross_expected = Column(Float, nullable=False)
-    net_expected = Column(Float, nullable=False)
-    cost_ratio = Column(Float, nullable=False)
-    costs = Column(JSONB, nullable=False)  # Full CostBreakdown
-
-    # AI reasoning
-    ai_reasoning = Column(Text, default="")
-    confluence_factors = Column(JSONB, default=list)
-    risk_factors = Column(JSONB, default=list)
-
-    # Context
-    market_context = Column(Text, default="")
-    regime = Column(String(20))
-    session = Column(String(30), default="")
-
-    # Status
-    status = Column(String(20), nullable=False, default="pending", index=True)
-    valid_until = Column(DateTime(timezone=True))
-
-    # Full signal data (for reconstruction)
-    signal_data = Column(JSONB, nullable=False)
-
-    # Relationships
-    trade = relationship("TradeRecord", back_populates="signal", uselist=False)
-
-    # Indexes for common queries
-    __table_args__ = (
-        Index("ix_signals_created_at", "created_at"),
-        Index("ix_signals_symbol_created", "symbol", "created_at"),
-        Index("ix_signals_edge_created", "primary_edge", "created_at"),
-        Index("ix_signals_status_created", "status", "created_at"),
+    trades: Mapped[List["TradeRecord"]] = relationship(
+        "TradeRecord", back_populates="signal"
     )
 
-    def __repr__(self):
-        return f"<Signal {self.signal_id}: {self.symbol} {self.direction} {self.status}>"
+    __table_args__ = (
+        Index("idx_signal_created", created_at.desc()),
+        Index("idx_signal_symbol_created", symbol, created_at.desc()),
+        Index("idx_signal_status_created", status, created_at.desc()),
+        Index("idx_signal_edge_created", primary_edge, created_at.desc()),
+        Index("idx_signal_tier_created", tier, created_at.desc()),
+    )
+
+    def to_dict(self) -> dict:
+        """Return all fields as dictionary."""
+        return {
+            "id": str(self.id),
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "signal_id": self.signal_id,
+            "opportunity_id": self.opportunity_id,
+            "symbol": self.symbol,
+            "market": self.market,
+            "direction": self.direction,
+            "entry_price": self.entry_price,
+            "stop_loss": self.stop_loss,
+            "take_profit": self.take_profit,
+            "position_size": self.position_size,
+            "position_value": self.position_value,
+            "risk_amount": self.risk_amount,
+            "risk_percent": self.risk_percent,
+            "primary_edge": self.primary_edge,
+            "secondary_edges": self.secondary_edges,
+            "edge_score": self.edge_score,
+            "tier": self.tier,
+            "gross_expected": self.gross_expected,
+            "net_expected": self.net_expected,
+            "cost_ratio": self.cost_ratio,
+            "costs": self.costs,
+            "ai_reasoning": self.ai_reasoning,
+            "confluence_factors": self.confluence_factors,
+            "risk_factors": self.risk_factors,
+            "market_context": self.market_context,
+            "session": self.session,
+            "valid_until": self.valid_until.isoformat() if self.valid_until else None,
+            "status": self.status,
+            "outcome_entry_price": self.outcome_entry_price,
+            "outcome_exit_price": self.outcome_exit_price,
+            "outcome_pnl": self.outcome_pnl,
+            "outcome_pnl_percent": self.outcome_pnl_percent,
+            "outcome_exit_reason": self.outcome_exit_reason,
+            "outcome_closed_at": (
+                self.outcome_closed_at.isoformat() if self.outcome_closed_at else None
+            ),
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"SignalRecord(signal_id={self.signal_id!r}, symbol={self.symbol!r}, "
+            f"status={self.status!r})"
+        )
 
 
 # =============================================================================
 # TRADE RECORD
 # =============================================================================
 
+
 class TradeRecord(Base):
     """
-    Stores executed trades with full outcome data.
-
-    Linked to SignalRecord - every trade comes from a signal.
+    Stores executed trades.
     """
-    __tablename__ = "trades"
+    __tablename__ = "trade_records"
 
-    # Primary key
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), primary_key=True, default=uuid.uuid4
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow
+    )
+    signal_id: Mapped[Optional[str]] = mapped_column(
+        String(50), ForeignKey("signal_records.signal_id"), index=True
+    )
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False)
+    market: Mapped[str] = mapped_column(String(20), nullable=False)
+    direction: Mapped[str] = mapped_column(String(10), nullable=False)
+    entry_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    exit_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    exit_price: Mapped[Optional[float]] = mapped_column(Float)
+    position_size: Mapped[float] = mapped_column(Float, nullable=False)
+    pnl: Mapped[Optional[float]] = mapped_column(Float)
+    pnl_percent: Mapped[Optional[float]] = mapped_column(Float)
+    exit_reason: Mapped[Optional[str]] = mapped_column(String(50))
+    slippage_entry: Mapped[Optional[float]] = mapped_column(Float)
+    slippage_exit: Mapped[Optional[float]] = mapped_column(Float)
+    costs_actual: Mapped[Optional[dict]] = mapped_column(JSON)
+    notes: Mapped[Optional[str]] = mapped_column(String(500))
 
-    # Timestamps
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-
-    # Link to signal
-    signal_id = Column(String(50), ForeignKey("signals.signal_id"), nullable=False, index=True)
-    signal = relationship("SignalRecord", back_populates="trade")
-
-    # Instrument
-    symbol = Column(String(20), nullable=False, index=True)
-    market = Column(String(30), nullable=False)
-    direction = Column(String(10), nullable=False)
-    primary_edge = Column(String(50), nullable=False, index=True)
-
-    # Entry
-    entry_price = Column(Float, nullable=False)
-    entry_time = Column(DateTime(timezone=True), nullable=False)
-    planned_stop = Column(Float, nullable=False)
-    planned_target = Column(Float, nullable=False)
-
-    # Exit
-    exit_price = Column(Float)
-    exit_time = Column(DateTime(timezone=True))
-    exit_reason = Column(String(30))  # stopped, target, manual, expired
-
-    # P&L
-    pnl = Column(Float)  # Absolute P&L in account currency
-    pnl_pct = Column(Float)  # P&L as percentage
-    r_multiple = Column(Float)  # Risk multiple achieved
-
-    # Position
-    position_size = Column(Float, nullable=False)
-    planned_risk_pct = Column(Float, nullable=False)
-    actual_risk_pct = Column(Float)
-
-    # Execution quality
-    slippage_entry = Column(Float, default=0.0)
-    slippage_exit = Column(Float, default=0.0)
-
-    # Costs
-    actual_costs = Column(JSONB)  # Full CostBreakdown
-
-    # Trade duration
-    hold_duration_minutes = Column(Integer)
-
-    # Indexes
-    __table_args__ = (
-        Index("ix_trades_entry_time", "entry_time"),
-        Index("ix_trades_symbol_entry", "symbol", "entry_time"),
-        Index("ix_trades_edge_entry", "primary_edge", "entry_time"),
-        Index("ix_trades_pnl", "pnl"),
+    signal: Mapped[Optional["SignalRecord"]] = relationship(
+        "SignalRecord", back_populates="trades"
     )
 
-    def __repr__(self):
-        return f"<Trade {self.signal_id}: {self.symbol} PnL={self.pnl}>"
+    def to_dict(self) -> dict:
+        """Return all fields as dictionary."""
+        return {
+            "id": str(self.id),
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "signal_id": self.signal_id,
+            "symbol": self.symbol,
+            "market": self.market,
+            "direction": self.direction,
+            "entry_time": self.entry_time.isoformat() if self.entry_time else None,
+            "entry_price": self.entry_price,
+            "exit_time": self.exit_time.isoformat() if self.exit_time else None,
+            "exit_price": self.exit_price,
+            "position_size": self.position_size,
+            "pnl": self.pnl,
+            "pnl_percent": self.pnl_percent,
+            "exit_reason": self.exit_reason,
+            "slippage_entry": self.slippage_entry,
+            "slippage_exit": self.slippage_exit,
+            "costs_actual": self.costs_actual,
+            "notes": self.notes,
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"TradeRecord(id={self.id!r}, symbol={self.symbol!r}, "
+            f"pnl={self.pnl})"
+        )
 
 
 # =============================================================================
 # DAILY PERFORMANCE
 # =============================================================================
 
+
 class DailyPerformance(Base):
     """
-    Daily aggregated performance metrics.
-
-    One row per trading day.
+    Daily trading aggregates.
     """
     __tablename__ = "daily_performance"
 
-    # Primary key is the date
-    date = Column(DateTime(timezone=True), primary_key=True)
+    id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), primary_key=True, default=uuid.uuid4
+    )
+    date: Mapped[date] = mapped_column(Date, unique=True, index=True, nullable=False)
+    starting_equity: Mapped[float] = mapped_column(Float, nullable=False)
+    ending_equity: Mapped[float] = mapped_column(Float, nullable=False)
+    pnl: Mapped[float] = mapped_column(Float, nullable=False)
+    pnl_percent: Mapped[float] = mapped_column(Float, nullable=False)
+    trades_taken: Mapped[int] = mapped_column(Integer, default=0)
+    winners: Mapped[int] = mapped_column(Integer, default=0)
+    losers: Mapped[int] = mapped_column(Integer, default=0)
+    win_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    largest_win: Mapped[float] = mapped_column(Float, default=0.0)
+    largest_loss: Mapped[float] = mapped_column(Float, default=0.0)
+    average_win: Mapped[float] = mapped_column(Float, default=0.0)
+    average_loss: Mapped[float] = mapped_column(Float, default=0.0)
+    profit_factor: Mapped[Optional[float]] = mapped_column(Float)
+    max_drawdown_day: Mapped[float] = mapped_column(Float, default=0.0)
+    edges_used: Mapped[dict] = mapped_column(JSON, default=lambda: {})
+    notes: Mapped[Optional[str]] = mapped_column(String(500))
 
-    # Equity tracking
-    starting_equity = Column(Float, nullable=False)
-    ending_equity = Column(Float, nullable=False)
-    high_equity = Column(Float)  # Intraday high
-    low_equity = Column(Float)   # Intraday low
+    def to_dict(self) -> dict:
+        """Return all fields as dictionary."""
+        return {
+            "id": str(self.id),
+            "date": self.date.isoformat() if self.date else None,
+            "starting_equity": self.starting_equity,
+            "ending_equity": self.ending_equity,
+            "pnl": self.pnl,
+            "pnl_percent": self.pnl_percent,
+            "trades_taken": self.trades_taken,
+            "winners": self.winners,
+            "losers": self.losers,
+            "win_rate": self.win_rate,
+            "largest_win": self.largest_win,
+            "largest_loss": self.largest_loss,
+            "average_win": self.average_win,
+            "average_loss": self.average_loss,
+            "profit_factor": self.profit_factor,
+            "max_drawdown_day": self.max_drawdown_day,
+            "edges_used": self.edges_used,
+            "notes": self.notes,
+        }
 
-    # P&L
-    pnl = Column(Float, nullable=False, default=0.0)
-    pnl_pct = Column(Float, nullable=False, default=0.0)
-
-    # Trade stats
-    trades_taken = Column(Integer, default=0)
-    winners = Column(Integer, default=0)
-    losers = Column(Integer, default=0)
-    scratch = Column(Integer, default=0)  # Break-even trades
-
-    # Win rate
-    win_rate = Column(Float)
-
-    # Best/worst
-    largest_win = Column(Float, default=0.0)
-    largest_loss = Column(Float, default=0.0)
-
-    # Risk metrics
-    max_heat_used = Column(Float)  # Peak portfolio heat
-    max_drawdown_intraday = Column(Float)
-
-    # Edge breakdown
-    edges_used = Column(JSONB, default=dict)  # {edge_type: count}
-
-    # Signals
-    signals_generated = Column(Integer, default=0)
-    signals_traded = Column(Integer, default=0)
-    signals_skipped = Column(Integer, default=0)
-
-    def __repr__(self):
-        return f"<DailyPerformance {self.date.date()}: {self.pnl_pct:+.2f}%>"
+    def __repr__(self) -> str:
+        return (
+            f"DailyPerformance(date={self.date!r}, pnl={self.pnl}, "
+            f"pnl_percent={self.pnl_percent})"
+        )
 
 
 # =============================================================================
 # EDGE PERFORMANCE
 # =============================================================================
 
+
 class EdgePerformance(Base):
     """
-    Performance tracking for each edge type.
-
-    Used for edge decay detection and strategy optimization.
+    Track performance by edge type.
     """
     __tablename__ = "edge_performance"
 
-    # Composite primary key
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), primary_key=True, default=uuid.uuid4
+    )
+    edge_type: Mapped[str] = mapped_column(String(30), index=True, nullable=False)
+    period: Mapped[str] = mapped_column(String(10), index=True, nullable=False)
+    period_start: Mapped[date] = mapped_column(Date, index=True, nullable=False)
+    trades: Mapped[int] = mapped_column(Integer, default=0)
+    wins: Mapped[int] = mapped_column(Integer, default=0)
+    losses: Mapped[int] = mapped_column(Integer, default=0)
+    total_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    average_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    win_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    expected_edge: Mapped[float] = mapped_column(Float, nullable=False)
+    actual_edge: Mapped[float] = mapped_column(Float, default=0.0)
+    is_healthy: Mapped[bool] = mapped_column(Boolean, default=True)
+    decay_warnings: Mapped[int] = mapped_column(Integer, default=0)
 
-    edge_type = Column(String(50), nullable=False, index=True)
-    period = Column(String(10), nullable=False)  # daily, weekly, monthly
-    period_start = Column(DateTime(timezone=True), nullable=False)
-    period_end = Column(DateTime(timezone=True), nullable=False)
-
-    # Trade stats
-    trades = Column(Integer, default=0)
-    wins = Column(Integer, default=0)
-    losses = Column(Integer, default=0)
-
-    # P&L
-    total_pnl = Column(Float, default=0.0)
-    avg_pnl = Column(Float, default=0.0)
-    total_pnl_pct = Column(Float, default=0.0)
-    avg_pnl_pct = Column(Float, default=0.0)
-
-    # Win rate
-    win_rate = Column(Float)
-
-    # R multiples
-    avg_r_multiple = Column(Float)
-    total_r = Column(Float)
-
-    # Health flag (for edge decay detection)
-    is_healthy = Column(Boolean, default=True)
-    consecutive_losing_periods = Column(Integer, default=0)
-
-    # Baseline comparison
-    baseline_win_rate = Column(Float)
-    baseline_avg_pnl = Column(Float)
-    deviation_from_baseline = Column(Float)  # In standard deviations
-
-    # Indexes
     __table_args__ = (
-        Index("ix_edge_perf_type_period", "edge_type", "period", "period_start"),
+        UniqueConstraint(
+            "edge_type", "period", "period_start",
+            name="uq_edge_period"
+        ),
     )
 
-    def __repr__(self):
-        return f"<EdgePerformance {self.edge_type} {self.period}: {self.win_rate:.1%}>"
+    def to_dict(self) -> dict:
+        """Return all fields as dictionary."""
+        return {
+            "id": str(self.id),
+            "edge_type": self.edge_type,
+            "period": self.period,
+            "period_start": self.period_start.isoformat() if self.period_start else None,
+            "trades": self.trades,
+            "wins": self.wins,
+            "losses": self.losses,
+            "total_pnl": self.total_pnl,
+            "average_pnl": self.average_pnl,
+            "win_rate": self.win_rate,
+            "expected_edge": self.expected_edge,
+            "actual_edge": self.actual_edge,
+            "is_healthy": self.is_healthy,
+            "decay_warnings": self.decay_warnings,
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"EdgePerformance(edge_type={self.edge_type!r}, period={self.period!r}, "
+            f"win_rate={self.win_rate})"
+        )
 
 
 # =============================================================================
 # SYSTEM STATE
 # =============================================================================
 
+
 class SystemState(Base):
     """
-    Current system state - singleton table.
-
-    Tracks real-time system status for circuit breakers and monitoring.
+    Singleton for current system state (always id=1).
     """
     __tablename__ = "system_state"
 
-    # Always id=1 (singleton)
-    id = Column(Integer, primary_key=True, default=1)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+    current_equity: Mapped[float] = mapped_column(Float, nullable=False)
+    starting_equity: Mapped[float] = mapped_column(Float, nullable=False)
+    daily_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    daily_pnl_percent: Mapped[float] = mapped_column(Float, default=0.0)
+    weekly_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    weekly_pnl_percent: Mapped[float] = mapped_column(Float, default=0.0)
+    drawdown_from_peak: Mapped[float] = mapped_column(Float, default=0.0)
+    drawdown_percent: Mapped[float] = mapped_column(Float, default=0.0)
+    peak_equity: Mapped[float] = mapped_column(Float, nullable=False)
+    open_positions: Mapped[list] = mapped_column(JSON, default=lambda: [])
+    portfolio_heat: Mapped[float] = mapped_column(Float, default=0.0)
+    portfolio_heat_percent: Mapped[float] = mapped_column(Float, default=0.0)
+    circuit_breaker_status: Mapped[str] = mapped_column(String(20), default="CLEAR")
+    kill_switch_active: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_signal_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_trade_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    mode: Mapped[str] = mapped_column(String(20), default="conservative")
 
-    # Last update
-    last_updated = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    def to_dict(self) -> dict:
+        """Return all fields as dictionary."""
+        return {
+            "id": self.id,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "current_equity": self.current_equity,
+            "starting_equity": self.starting_equity,
+            "daily_pnl": self.daily_pnl,
+            "daily_pnl_percent": self.daily_pnl_percent,
+            "weekly_pnl": self.weekly_pnl,
+            "weekly_pnl_percent": self.weekly_pnl_percent,
+            "drawdown_from_peak": self.drawdown_from_peak,
+            "drawdown_percent": self.drawdown_percent,
+            "peak_equity": self.peak_equity,
+            "open_positions": self.open_positions,
+            "portfolio_heat": self.portfolio_heat,
+            "portfolio_heat_percent": self.portfolio_heat_percent,
+            "circuit_breaker_status": self.circuit_breaker_status,
+            "kill_switch_active": self.kill_switch_active,
+            "last_signal_at": (
+                self.last_signal_at.isoformat() if self.last_signal_at else None
+            ),
+            "last_trade_at": (
+                self.last_trade_at.isoformat() if self.last_trade_at else None
+            ),
+            "mode": self.mode,
+        }
 
-    # Equity
-    starting_equity_today = Column(Float, nullable=False)
-    current_equity = Column(Float, nullable=False)
-    peak_equity = Column(Float, nullable=False)
-
-    # P&L
-    daily_pnl = Column(Float, default=0.0)
-    daily_pnl_pct = Column(Float, default=0.0)
-    weekly_pnl = Column(Float, default=0.0)
-    weekly_pnl_pct = Column(Float, default=0.0)
-    monthly_pnl = Column(Float, default=0.0)
-    monthly_pnl_pct = Column(Float, default=0.0)
-
-    # Drawdown
-    drawdown = Column(Float, default=0.0)
-    drawdown_pct = Column(Float, default=0.0)
-
-    # Positions
-    open_positions = Column(JSONB, default=list)
-    open_position_count = Column(Integer, default=0)
-    portfolio_heat = Column(Float, default=0.0)
-
-    # Streaks
-    win_streak = Column(Integer, default=0)
-    loss_streak = Column(Integer, default=0)
-
-    # Circuit breaker status
-    circuit_breaker_status = Column(String(20), default="clear")
-    circuit_breaker_reason = Column(Text, default="")
-
-    # Kill switch
-    kill_switch_active = Column(Boolean, default=False)
-    kill_switch_reason = Column(Text, default="")
-    kill_switch_activated_at = Column(DateTime(timezone=True))
-
-    # System health
-    is_healthy = Column(Boolean, default=True)
-    last_scan_at = Column(DateTime(timezone=True))
-    last_signal_at = Column(DateTime(timezone=True))
-
-    def __repr__(self):
-        return f"<SystemState: equity={self.current_equity} heat={self.portfolio_heat}%>"
+    def __repr__(self) -> str:
+        return (
+            f"SystemState(id={self.id}, current_equity={self.current_equity}, "
+            f"portfolio_heat={self.portfolio_heat})"
+        )
 
 
 # =============================================================================
-# ALERT LOG
+# AUDIT LOG
 # =============================================================================
 
-class AlertLog(Base):
+
+class AuditLog(Base):
     """
-    Log of all alerts sent.
-
-    Tracks what was sent, when, and delivery status.
+    System event logging.
     """
-    __tablename__ = "alert_log"
+    __tablename__ = "audit_logs"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), primary_key=True, default=uuid.uuid4
+    )
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, index=True, nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(String(50), index=True, nullable=False)
+    severity: Mapped[str] = mapped_column(String(10), nullable=False)
+    component: Mapped[str] = mapped_column(String(50), nullable=False)
+    message: Mapped[str] = mapped_column(String(1000), nullable=False)
+    details: Mapped[Optional[dict]] = mapped_column(JSON)
+    signal_id: Mapped[Optional[str]] = mapped_column(String(50))
+    trade_id: Mapped[Optional[uuid.UUID]] = mapped_column(GUID())
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-
-    # Alert details
-    alert_type = Column(String(30), nullable=False)  # signal, warning, error, etc.
-    priority = Column(String(10), nullable=False)  # low, medium, high, critical
-    title = Column(String(200), nullable=False)
-    message = Column(Text, nullable=False)
-
-    # Related entities
-    signal_id = Column(String(50))
-
-    # Delivery
-    channels = Column(JSONB, default=list)  # ["discord", "telegram"]
-    delivered_discord = Column(Boolean, default=False)
-    delivered_telegram = Column(Boolean, default=False)
-    delivery_error = Column(Text)
-
-    # Indexes
     __table_args__ = (
-        Index("ix_alerts_created", "created_at"),
-        Index("ix_alerts_type", "alert_type", "created_at"),
+        Index("idx_audit_type_timestamp", event_type, timestamp.desc()),
+        Index("idx_audit_severity_timestamp", severity, timestamp.desc()),
     )
 
-    def __repr__(self):
-        return f"<Alert {self.alert_type}: {self.title[:30]}>"
+    def to_dict(self) -> dict:
+        """Return all fields as dictionary."""
+        return {
+            "id": str(self.id),
+            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "event_type": self.event_type,
+            "severity": self.severity,
+            "component": self.component,
+            "message": self.message,
+            "details": self.details,
+            "signal_id": self.signal_id,
+            "trade_id": str(self.trade_id) if self.trade_id else None,
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"AuditLog(id={self.id!r}, event_type={self.event_type!r}, "
+            f"severity={self.severity!r})"
+        )
