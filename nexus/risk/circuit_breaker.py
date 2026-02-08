@@ -20,6 +20,7 @@ from typing import Optional
 from nexus.config.settings import get_settings
 from nexus.core.enums import CircuitBreakerStatus
 from nexus.core.models import CircuitBreakerState
+from nexus.risk.state_persistence import get_risk_persistence
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,27 @@ class SmartCircuitBreaker:
         Returns:
             CircuitBreakerState with status, can_trade, size_multiplier, message
         """
+        # FIRST: Check persisted state (survives restarts)
+        persistence = get_risk_persistence()
+        allowed, persist_reason = persistence.is_trading_allowed()
+        if not allowed:
+            name = persistence.get_circuit_breaker_status()
+            try:
+                status = CircuitBreakerStatus[name]
+            except KeyError:
+                status = CircuitBreakerStatus.FULL_STOP
+            return CircuitBreakerState(
+                status=status,
+                can_trade=False,
+                size_multiplier=0.0,
+                daily_pnl_pct=daily_pnl_pct,
+                weekly_pnl_pct=weekly_pnl_pct,
+                drawdown_pct=drawdown_pct,
+                message=persist_reason,
+                triggered_at=None,
+                resume_at=None,
+            )
+
         now = datetime.now(UTC)
         today = now.date()
 
@@ -100,6 +122,11 @@ class SmartCircuitBreaker:
             if self._current_status == CircuitBreakerStatus.FULL_STOP:
                 logger.info(
                     "Circuit breaker status check: FULL_STOP (manual reset required)"
+                )
+                persistence = get_risk_persistence()
+                persistence.set_circuit_breaker_status(
+                    "FULL_STOP",
+                    "Max drawdown limit hit. Full stop - manual review required.",
                 )
                 return CircuitBreakerState(
                     status=CircuitBreakerStatus.FULL_STOP,
@@ -121,6 +148,11 @@ class SmartCircuitBreaker:
                         "Circuit breaker status check: WEEKLY_STOP (resume %s)",
                         resume.isoformat(),
                     )
+                    persistence = get_risk_persistence()
+                    persistence.set_circuit_breaker_status(
+                        "WEEKLY_STOP",
+                        f"Weekly loss {weekly_pnl_pct:.2f}% exceeds limit. Trading halted until next week.",
+                    )
                     return CircuitBreakerState(
                         status=CircuitBreakerStatus.WEEKLY_STOP,
                         can_trade=False,
@@ -139,6 +171,11 @@ class SmartCircuitBreaker:
                 logger.info(
                     "Circuit breaker status check: DAILY_STOP (resume %s)",
                     resume.isoformat(),
+                )
+                persistence = get_risk_persistence()
+                persistence.set_circuit_breaker_status(
+                    "DAILY_STOP",
+                    f"Daily loss {daily_pnl_pct:.2f}% exceeds limit. Trading halted for today.",
                 )
                 return CircuitBreakerState(
                     status=CircuitBreakerStatus.DAILY_STOP,
@@ -171,6 +208,11 @@ class SmartCircuitBreaker:
                         drawdown_pct,
                         self.max_drawdown,
                     )
+                persistence = get_risk_persistence()
+                persistence.set_circuit_breaker_status(
+                    "FULL_STOP",
+                    f"Max drawdown {drawdown_pct:.2f}% hit. Full stop - manual review required.",
+                )
                 return CircuitBreakerState(
                     status=CircuitBreakerStatus.FULL_STOP,
                     can_trade=False,
@@ -195,6 +237,11 @@ class SmartCircuitBreaker:
                         weekly_pnl_pct,
                         self.weekly_loss_stop,
                     )
+                persistence = get_risk_persistence()
+                persistence.set_circuit_breaker_status(
+                    "WEEKLY_STOP",
+                    f"Weekly loss {weekly_pnl_pct:.2f}% exceeds limit. Trading halted until next week.",
+                )
                 resume = _next_monday_utc(today)
                 return CircuitBreakerState(
                     status=CircuitBreakerStatus.WEEKLY_STOP,
@@ -220,6 +267,11 @@ class SmartCircuitBreaker:
                         daily_pnl_pct,
                         self.daily_loss_stop,
                     )
+                persistence = get_risk_persistence()
+                persistence.set_circuit_breaker_status(
+                    "DAILY_STOP",
+                    f"Daily loss {daily_pnl_pct:.2f}% exceeds limit. Trading halted for today.",
+                )
                 resume = _tomorrow_utc(today)
                 return CircuitBreakerState(
                     status=CircuitBreakerStatus.DAILY_STOP,
@@ -284,6 +336,7 @@ class SmartCircuitBreaker:
             if self._current_status == CircuitBreakerStatus.DAILY_STOP:
                 self._current_status = CircuitBreakerStatus.CLEAR
                 self._triggered_at = None
+                get_risk_persistence().set_circuit_breaker_status("CLEAR", "")
 
     def reset_weekly(self) -> None:
         """Reset weekly stop at start of new trading week."""
@@ -294,6 +347,7 @@ class SmartCircuitBreaker:
             if self._current_status == CircuitBreakerStatus.WEEKLY_STOP:
                 self._current_status = CircuitBreakerStatus.CLEAR
                 self._triggered_at = None
+                get_risk_persistence().set_circuit_breaker_status("CLEAR", "")
 
     def force_reset(self) -> None:
         """Manual reset (requires explicit action). Clears FULL_STOP and sticky state."""
@@ -304,6 +358,7 @@ class SmartCircuitBreaker:
             self._triggered_at = None
             self._daily_stop_date = None
             self._weekly_stop_date = None
+            get_risk_persistence().set_circuit_breaker_status("CLEAR", "")
 
     def get_thresholds(self) -> dict:
         """Return all threshold values for display/logging."""

@@ -27,6 +27,7 @@ from nexus.execution.trade_executor import TradeExecutor, create_paper_executor
 from nexus.delivery.alert_manager import AlertManager
 from nexus.risk.circuit_breaker import SmartCircuitBreaker
 from nexus.risk.kill_switch import KillSwitch, set_kill_switch
+from nexus.risk.state_persistence import get_risk_persistence
 from nexus.intelligence.cost_engine import CostEngine
 from nexus.risk.position_sizer import DynamicPositionSizer
 from nexus.risk.heat_manager import DynamicHeatManager
@@ -80,6 +81,19 @@ class NexusScheduler:
         self.circuit_breaker = SmartCircuitBreaker(self.settings)
         self.kill_switch = KillSwitch(self.settings)
         set_kill_switch(self.kill_switch)
+
+        # Check persisted safety state on startup
+        persistence = get_risk_persistence()
+        allowed, reason = persistence.is_trading_allowed()
+        if not allowed:
+            logger.critical("🚨 TRADING BLOCKED ON STARTUP: %s", reason)
+            logger.critical(
+                "Manual reset required via: persistence.manual_reset('I_CONFIRM_RESET_AFTER_REVIEWING_LOSSES')"
+            )
+            self._startup_blocked = True
+        else:
+            self._startup_blocked = False
+            logger.info("✅ Safety state check passed - trading allowed")
 
         # Cost / sizing / heat / correlation (for SignalGenerator)
         self.cost_engine = CostEngine()
@@ -160,6 +174,11 @@ class NexusScheduler:
     
     async def run_scan_cycle(self) -> None:
         """Run one complete scan → score → signal → execute → alert cycle."""
+        # Check if blocked on startup
+        if getattr(self, "_startup_blocked", False):
+            logger.warning("Trading blocked - manual reset required")
+            return
+
         cycle_start = datetime.now(timezone.utc)
         logger.info(f"{'='*60}")
         logger.info(f"SCAN CYCLE START: {cycle_start.strftime('%H:%M:%S')} UTC")

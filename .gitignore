@@ -72,3 +72,6 @@ temp/
 # Build artifacts
 *.egg-info/
 .eggs/
+
+# Risk state persistence (contains safety status)
+nexus_risk_state.json

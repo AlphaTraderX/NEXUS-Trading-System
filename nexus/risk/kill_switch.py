@@ -20,6 +20,7 @@ from nexus.config.settings import get_settings
 from nexus.core.enums import KillSwitchAction, KillSwitchTrigger
 from nexus.core.exceptions import KillSwitchError
 from nexus.core.models import KillSwitchState, SystemHealth
+from nexus.risk.state_persistence import get_risk_persistence
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,31 @@ class KillSwitch:
             try:
                 if not self.enabled:
                     return self._get_state_locked(health)
+
+                # Check persisted kill switch state first
+                try:
+                    persistence = get_risk_persistence()
+                    if persistence._state.get("kill_switch_active"):
+                        self._is_triggered = True
+                        self._trigger = KillSwitchTrigger.SYSTEM_ERROR
+                        self._action_taken = KillSwitchAction.DISABLE_NEW_TRADES
+                        self._message = persistence._state.get(
+                            "kill_switch_reason",
+                            "Kill switch was previously activated",
+                        )
+                        ts = persistence._state.get("kill_switch_triggered_at")
+                        if ts:
+                            try:
+                                self._triggered_at = datetime.fromisoformat(
+                                    ts.replace("Z", "+00:00")
+                                )
+                            except (ValueError, TypeError):
+                                self._triggered_at = datetime.now(UTC)
+                        else:
+                            self._triggered_at = datetime.now(UTC)
+                        return self._get_state_locked(health)
+                except Exception as e:
+                    logger.error("Failed to check persisted kill switch state: %s", e)
 
                 if self._is_triggered:
                     return self._get_state_locked(health)
@@ -198,6 +224,11 @@ class KillSwitch:
         self._action_taken = action
         self._triggered_at = datetime.now(UTC)
         self._message = message
+        try:
+            persistence = get_risk_persistence()
+            persistence.activate_kill_switch(reason.value)
+        except Exception as e:
+            logger.error("Failed to persist kill switch state: %s", e)
         logger.critical(
             "KILL SWITCH TRIGGERED: %s | %s | action=%s",
             reason.value,
