@@ -3,7 +3,7 @@ Session-based scanners (power hour, London/NY open, Asian range).
 """
 
 import logging
-from datetime import datetime, time
+from datetime import datetime, time, timezone
 from typing import Dict, List, Optional
 import pandas as pd
 import pytz
@@ -472,28 +472,45 @@ class AsianRangeScanner(BaseScanner):
         """
         Calculate Asian session high and low.
 
-        Asian session: 00:00-07:00 UK time (approximately 7 hours of data)
-        For 5-minute bars, that's about 84 bars.
+        Asian session: 00:00-07:00 UTC. Filter bars by actual timestamps
+        to avoid London morning bar contamination.
 
         Returns:
         - asian_high: Highest price during Asian session
         - asian_low: Lowest price during Asian session
         - range_pips: Range in pips
         """
-        # For placeholder, use last 84 bars (7 hours of 5-min data)
-        # In production, would filter by actual timestamps
-        asian_bars = bars.tail(84) if len(bars) >= 84 else bars
+        if timestamp.tzinfo is None:
+            ts_utc = timestamp
+        else:
+            ts_utc = timestamp.astimezone(timezone.utc)
+        today = ts_utc.date()
 
-        asian_high = asian_bars['high'].max()
-        asian_low = asian_bars['low'].min()
+        asian_start = datetime.combine(today, time(0, 0), tzinfo=timezone.utc)
+        asian_end = datetime.combine(today, time(7, 0), tzinfo=timezone.utc)
 
-        # Calculate range in pips (assuming 4-decimal forex pairs)
+        if "timestamp" in bars.columns:
+            asian_bars = bars[
+                (bars["timestamp"] >= asian_start) & (bars["timestamp"] < asian_end)
+            ]
+        else:
+            asian_bars = bars.head(7)
+
+        if len(asian_bars) < 3:
+            return {
+                "asian_high": bars["high"].max(),
+                "asian_low": bars["low"].min(),
+                "range_pips": 0.0,
+            }
+
+        asian_high = asian_bars["high"].max()
+        asian_low = asian_bars["low"].min()
         range_pips = (asian_high - asian_low) * 10000
 
         return {
             "asian_high": asian_high,
             "asian_low": asian_low,
-            "range_pips": range_pips
+            "range_pips": range_pips,
         }
 
     async def scan(self) -> List[Opportunity]:

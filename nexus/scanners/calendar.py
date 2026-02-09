@@ -199,6 +199,18 @@ class TurnOfMonthScanner(BaseScanner):
                 target_multiplier=2.5,
             )
 
+            # TOM window: day -1 through day 3 (4 days total). Remaining = days left in window.
+            if tom_day == -1:
+                remaining = 4
+            elif tom_day == 1:
+                remaining = 3
+            elif tom_day == 2:
+                remaining = 2
+            elif tom_day == 3:
+                remaining = 1
+            else:
+                remaining = 0
+
             opp = self.create_opportunity(
                 symbol=symbol,
                 market=self._get_market_for_symbol(symbol),
@@ -208,7 +220,7 @@ class TurnOfMonthScanner(BaseScanner):
                 take_profit=target,
                 edge_data={
                     "tom_day": tom_day,
-                    "window_remaining_days": 4 - abs(tom_day) if tom_day != 0 else 0,
+                    "window_remaining_days": remaining,
                     "atr": atr,
                     "atr_percent": (atr / current_price) * 100,
                 },

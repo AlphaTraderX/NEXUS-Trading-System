@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, time
+from datetime import datetime, time, timedelta, timezone
 from typing import List, Optional
 import pandas as pd
 import pytz
@@ -79,23 +79,45 @@ class ORBScanner(BaseScanner):
     async def _scan_symbol(self, symbol: str, market: Market) -> Optional[Opportunity]:
         """Scan single symbol for ORB setup."""
 
-        # Get 5-min bars (need ~40 bars for opening range + current + history)
+        # Get 5-minute bars
         bars = await self.get_bars_safe(symbol, "5m", 50)
 
-        if bars is None or len(bars) < 20:
+        if bars is None or len(bars) < 6:
             return None
 
-        # Define opening range (first 6 bars = 30 minutes of 5-min bars)
-        opening_bars = bars.iloc[:6]
-        opening_high = opening_bars['high'].max()
-        opening_low = opening_bars['low'].min()
+        # Filter to today's session only
+        today = datetime.now(timezone.utc).date()
+        if "timestamp" in bars.columns:
+            today_bars = bars[bars["timestamp"].dt.date == today]
+        else:
+            today_bars = bars
+
+        # Get market open time for this symbol
+        market_open = self._get_market_open_time(symbol)
+
+        # Filter to first 30 minutes (6 x 5-min bars) after open
+        if "timestamp" in today_bars.columns and market_open is not None:
+            opening_range_end = market_open + timedelta(minutes=30)
+            opening_bars = today_bars[
+                (today_bars["timestamp"] >= market_open)
+                & (today_bars["timestamp"] < opening_range_end)
+            ]
+        else:
+            opening_bars = today_bars.head(6)
+
+        if len(opening_bars) < 2:
+            return None
+
+        # Calculate opening range
+        opening_high = opening_bars["high"].max()
+        opening_low = opening_bars["low"].min()
         opening_range = opening_high - opening_low
 
         if opening_range <= 0:
             return None
 
-        # Current price and recent bars
-        current_price = bars['close'].iloc[-1]
+        # Current price and recent bars (use full bars for volume comparison)
+        current_price = bars["close"].iloc[-1]
         recent_bars = bars.iloc[-10:]  # Last 10 bars for volume comparison
 
         # FILTER 1: Check volume (must be > 120% of average)
@@ -107,8 +129,8 @@ class ORBScanner(BaseScanner):
             logger.debug(f"ORB {symbol}: Volume ratio {volume_ratio:.2f} below threshold")
             return None
 
-        # FILTER 2: Calculate VWAP for confirmation
-        vwap = self._calculate_vwap(bars)
+        # FILTER 2: Calculate VWAP for confirmation (use today's bars)
+        vwap = self._calculate_vwap(today_bars if "timestamp" in bars.columns else bars)
         if vwap is None or vwap <= 0:
             return None
 
@@ -174,17 +196,33 @@ class ORBScanner(BaseScanner):
     def _calculate_vwap(self, bars: pd.DataFrame) -> Optional[float]:
         """Calculate Volume Weighted Average Price."""
         try:
-            typical_price = (bars['high'] + bars['low'] + bars['close']) / 3
-            total_volume = bars['volume'].sum()
+            typical_price = (bars["high"] + bars["low"] + bars["close"]) / 3
+            total_volume = bars["volume"].sum()
 
             if total_volume <= 0:
                 return None
 
-            vwap = (typical_price * bars['volume']).sum() / total_volume
+            vwap = (typical_price * bars["volume"]).sum() / total_volume
             return float(vwap)
         except Exception as e:
             logger.warning(f"VWAP calculation failed: {e}")
             return None
+
+    def _get_market_open_time(self, symbol: str) -> Optional[datetime]:
+        """Get market open time for symbol."""
+        now = datetime.now(timezone.utc)
+        today = now.date()
+
+        # US markets open 14:30 UTC (9:30 ET)
+        us_symbols = [
+            "SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "TSLA", "AMD",
+            "META", "GOOGL", "AMZN",
+        ]
+        if symbol in us_symbols:
+            return datetime.combine(today, time(14, 30), tzinfo=timezone.utc)
+
+        # Default to US market open
+        return datetime.combine(today, time(14, 30), tzinfo=timezone.utc)
 
     def _get_instruments(self, market: Market) -> List[str]:
         if self.instruments:

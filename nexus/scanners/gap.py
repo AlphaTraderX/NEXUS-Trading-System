@@ -75,8 +75,8 @@ class GapScanner(BaseScanner):
     async def _scan_symbol(self, symbol: str, market: Market) -> Optional[Opportunity]:
         """Scan a single symbol for gap fill opportunity."""
 
-        # Get recent daily bars (need at least 2 for gap calculation)
-        bars = await self.get_bars_safe(symbol, "1D", 5)
+        # Get daily bars (need 20 for proper 14-period ATR, and at least 2 for gap)
+        bars = await self.get_bars_safe(symbol, "1D", 20)
 
         if bars is None or len(bars) < 2:
             logger.debug(f"Gap insufficient data for {symbol}")
@@ -95,8 +95,8 @@ class GapScanner(BaseScanner):
         if abs_gap < self.min_gap_pct or abs_gap > self.max_gap_pct:
             return None  # Gap too small or too large
 
-        # Calculate ATR for stop placement
-        atr = self.calculate_atr(bars, 14) if len(bars) >= 14 else None
+        # Calculate ATR for stop placement (14-period; we fetch 20 bars for enough data)
+        atr = self._calculate_atr(bars, 14)
         if atr is None or atr <= 0:
             atr = current_price * 0.015  # Fallback: 1.5% of price
 
@@ -157,6 +157,27 @@ class GapScanner(BaseScanner):
         )
 
         return opp
+
+    def _calculate_atr(self, bars: pd.DataFrame, period: int = 14) -> Optional[float]:
+        """Calculate ATR with proper period."""
+        if len(bars) < period + 1:
+            avg_price = bars["close"].mean()
+            return float(avg_price * 0.015)  # 1.5% fallback when not enough data
+
+        high = bars["high"]
+        low = bars["low"]
+        close = bars["close"].shift(1)
+
+        tr1 = high - low
+        tr2 = abs(high - close)
+        tr3 = abs(low - close)
+
+        true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = true_range.rolling(window=period).mean().iloc[-1]
+
+        if pd.isna(atr):
+            return float(bars["close"].iloc[-1] * 0.015)
+        return float(atr)
 
     def _get_instruments(self, market: Market) -> List[str]:
         """Get instruments to scan for a market."""

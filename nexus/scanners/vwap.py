@@ -90,9 +90,12 @@ class VWAPScanner(BaseScanner):
             )
             return None
 
-        # Calculate VWAP
+        # Calculate VWAP (current session only)
         vwap = self._calculate_vwap(bars)
-        if vwap is None or vwap <= 0:
+        if vwap is None:
+            logger.debug(f"No VWAP data for {symbol} - skipping")
+            return None
+        if vwap <= 0:
             return None
 
         # Calculate VWAP standard deviation
@@ -156,20 +159,27 @@ class VWAPScanner(BaseScanner):
 
     def _calculate_vwap(self, bars: pd.DataFrame) -> Optional[float]:
         """
-        Calculate Volume Weighted Average Price.
-
-        VWAP = Σ(Typical Price × Volume) / Σ(Volume)
-        Typical Price = (High + Low + Close) / 3
+        Calculate Volume Weighted Average Price for CURRENT SESSION ONLY.
+        VWAP resets at market open each day.
         """
         try:
-            typical_price = (bars["high"] + bars["low"] + bars["close"]) / 3
-            total_volume = bars["volume"].sum()
+            # Filter to current trading day only
+            if "timestamp" in bars.columns:
+                today = datetime.now(timezone.utc).date()
+                if hasattr(bars["timestamp"].iloc[0], "date"):
+                    bars = bars[bars["timestamp"].dt.date == today]
 
-            if total_volume <= 0:
+            if len(bars) == 0:
                 return None
 
-            vwap = (typical_price * bars["volume"]).sum() / total_volume
-            return float(vwap)
+            typical_price = (bars["high"] + bars["low"] + bars["close"]) / 3
+            cumulative_tp_vol = (typical_price * bars["volume"]).sum()
+            cumulative_vol = bars["volume"].sum()
+
+            if cumulative_vol == 0:
+                return None
+
+            return float(cumulative_tp_vol / cumulative_vol)
         except Exception as e:
             logger.warning("vwap_calculation_failed", extra={"error": str(e)})
             return None
