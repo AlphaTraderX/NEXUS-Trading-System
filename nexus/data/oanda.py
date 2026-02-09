@@ -8,6 +8,7 @@ API Docs: https://developer.oanda.com/rest-live-v20/introduction/
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -103,7 +104,7 @@ class OANDAProvider(BaseBroker):
         """Initialize HTTP client and verify connection."""
         try:
             self.client = httpx.AsyncClient(
-                timeout=30.0,
+                timeout=httpx.Timeout(30.0),
                 headers=self._headers
             )
             
@@ -137,13 +138,14 @@ class OANDAProvider(BaseBroker):
         endpoint: str,
         params: Dict = None,
         json_data: Dict = None
-    ) -> Dict:
-        """Make API request."""
+    ) -> Optional[Dict]:
+        """Make authenticated request to OANDA API."""
         if not self.client:
-            raise RuntimeError("Not connected. Call connect() first.")
-        
+            logger.error("OANDA not connected. Call connect() first.")
+            return None
+
         url = f"{self.rest_url}{endpoint}"
-        
+
         try:
             response = await self.client.request(
                 method,
@@ -153,40 +155,57 @@ class OANDAProvider(BaseBroker):
             )
             response.raise_for_status()
             return response.json()
-            
+
+        except httpx.TimeoutException as e:
+            logger.warning(f"OANDA timeout for {endpoint}: {e}")
+            return None
         except httpx.HTTPStatusError as e:
-            logger.error(f"OANDA API error: {e.response.status_code} - {e.response.text}")
-            raise
+            logger.error(f"OANDA HTTP error for {endpoint}: {e.response.status_code}")
+            if e.response.status_code == 429:
+                logger.warning("OANDA rate limit hit - backing off")
+            return None
+        except httpx.RequestError as e:
+            logger.error(f"OANDA request error for {endpoint}: {e}")
+            return None
+        except json.JSONDecodeError as e:
+            logger.error(f"OANDA JSON decode error for {endpoint}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"OANDA unexpected error for {endpoint}: {e}")
+            return None
     
     # ==================== Data Methods ====================
     
-    async def get_quote(self, symbol: str) -> Quote:
+    async def get_quote(self, symbol: str) -> Optional[Quote]:
         """
         Get current quote for a forex pair.
-        
+
         Args:
             symbol: Forex pair (e.g., "EUR/USD" or "EUR_USD")
         """
         instrument = self._normalize_symbol(symbol)
-        
+
         endpoint = f"/v3/accounts/{self.account_id}/pricing"
         params = {"instruments": instrument}
-        
+
         data = await self._request("GET", endpoint, params=params)
-        
+        if data is None:
+            return None
+
         prices = data.get("prices", [])
         if not prices:
-            raise ValueError(f"No pricing data for {symbol}")
-        
+            logger.warning(f"No pricing data for {symbol}")
+            return None
+
         price = prices[0]
-        
+
         # Get bid/ask from price buckets
         bids = price.get("bids", [{}])
         asks = price.get("asks", [{}])
-        
+
         bid = float(bids[0].get("price", 0)) if bids else 0
         ask = float(asks[0].get("price", 0)) if asks else 0
-        
+
         try:
             from nexus.risk.kill_switch import get_kill_switch
             kill_switch = get_kill_switch()
@@ -195,13 +214,19 @@ class OANDAProvider(BaseBroker):
         except Exception:
             pass  # Don't crash on kill switch update failure
 
+        try:
+            ts = price.get("time", "").replace("Z", "+00:00")
+            timestamp = datetime.fromisoformat(ts) if ts else datetime.now(UTC)
+        except Exception:
+            timestamp = datetime.now(UTC)
+
         return Quote(
             symbol=symbol,
             bid=bid,
             ask=ask,
             last=(bid + ask) / 2,  # Mid price as "last"
             volume=0,  # Forex doesn't have volume in the same way
-            timestamp=datetime.fromisoformat(price.get("time", "").replace("Z", "+00:00"))
+            timestamp=timestamp,
         )
     
     async def get_bars(
@@ -210,10 +235,10 @@ class OANDAProvider(BaseBroker):
         timeframe: str,
         limit: int = 100,
         end_date: Optional[datetime] = None
-    ) -> pd.DataFrame:
+    ) -> Optional[pd.DataFrame]:
         """
         Get historical OHLCV bars for a forex pair.
-        
+
         Args:
             symbol: Forex pair (e.g., "EUR/USD" or "EUR_USD")
             timeframe: Bar timeframe (1m, 5m, 15m, 1h, 4h, 1D)
@@ -222,25 +247,28 @@ class OANDAProvider(BaseBroker):
         """
         instrument = self._normalize_symbol(symbol)
         tf = normalize_timeframe(timeframe)
-        
+
         if tf not in self.GRANULARITY_MAP:
-            raise ValueError(f"Unsupported timeframe: {timeframe}")
-        
+            logger.error(f"Unsupported timeframe: {timeframe}")
+            return None
+
         granularity = self.GRANULARITY_MAP[tf]
-        
+
         endpoint = f"/v3/instruments/{instrument}/candles"
-        
+
         params = {
             "granularity": granularity,
             "count": min(limit, 5000),
             "price": "MBA",  # Mid, Bid, Ask
         }
-        
+
         if end_date:
             params["to"] = end_date.isoformat()
-        
+
         data = await self._request("GET", endpoint, params=params)
-        
+        if data is None:
+            return None
+
         candles = data.get("candles", [])
         
         if not candles:
@@ -283,13 +311,16 @@ class OANDAProvider(BaseBroker):
     
     # ==================== Account Methods ====================
     
-    async def get_account(self) -> AccountInfo:
+    async def get_account(self) -> Optional[AccountInfo]:
         """Get account information."""
         endpoint = f"/v3/accounts/{self.account_id}"
-        
+
         data = await self._request("GET", endpoint)
+        if data is None:
+            return None
+
         account = data.get("account", {})
-        
+
         return AccountInfo(
             balance=float(account.get("balance", 0)),
             equity=float(account.get("NAV", 0)),
@@ -302,8 +333,11 @@ class OANDAProvider(BaseBroker):
     async def get_positions(self) -> List[Position]:
         """Get all open positions."""
         endpoint = f"/v3/accounts/{self.account_id}/openPositions"
-        
+
         data = await self._request("GET", endpoint)
+        if data is None:
+            return []
+
         positions = data.get("positions", [])
         
         result = []
@@ -386,7 +420,13 @@ class OANDAProvider(BaseBroker):
         
         try:
             data = await self._request("POST", endpoint, json_data=order_data)
-            
+            if data is None:
+                return OrderResult(
+                    order_id="",
+                    status="rejected",
+                    message="OANDA request failed (no response)",
+                )
+
             # Check for fill
             if "orderFillTransaction" in data:
                 fill = data["orderFillTransaction"]
@@ -448,7 +488,13 @@ class OANDAProvider(BaseBroker):
         
         try:
             response = await self._request("PUT", endpoint, json_data=data)
-            
+            if response is None:
+                return OrderResult(
+                    order_id="",
+                    status="rejected",
+                    message="OANDA request failed (no response)",
+                )
+
             return OrderResult(
                 order_id=response.get("relatedTransactionIDs", [""])[0],
                 status="filled",

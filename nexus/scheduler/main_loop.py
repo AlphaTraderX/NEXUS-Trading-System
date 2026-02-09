@@ -381,24 +381,39 @@ class NexusScheduler:
         
         self._log(f"Scheduler started. Scanning every {self.scan_interval} seconds.")
         
-        # Main loop
-        try:
-            while self.running:
+        # Main loop with catch-all so a single exception does not kill the scheduler
+        while self.running:
+            try:
                 self.scan_count += 1
-                
-                # Run scan cycle
                 await self.run_scan_cycle()
-                
-                # Wait for next cycle
-                if self.running:
-                    await asyncio.sleep(self.scan_interval)
-                    
-        except asyncio.CancelledError:
-            self._log("Scheduler cancelled")
-        except KeyboardInterrupt:
-            self._log("Keyboard interrupt received")
-        finally:
-            await self.stop()
+            except asyncio.CancelledError:
+                logger.info("Scheduler cancelled - shutting down")
+                break
+            except KeyboardInterrupt:
+                logger.info("Keyboard interrupt - shutting down")
+                break
+            except Exception as e:
+                # CATCH-ALL: Log but don't crash
+                logger.critical(
+                    "Unhandled exception in scan cycle: %s",
+                    e,
+                    exc_info=True,
+                )
+                try:
+                    await self.alert_manager.send_alert(
+                        f"SCHEDULER ERROR: {str(e)[:200]}",
+                        priority=AlertPriority.CRITICAL,
+                    )
+                except Exception:
+                    pass  # Don't crash on alert failure
+                await asyncio.sleep(10)
+                continue
+
+            # Normal inter-cycle delay
+            if self.running:
+                await asyncio.sleep(self.scan_interval)
+
+        await self.stop()
     
     async def stop(self):
         """Stop the scheduler gracefully."""

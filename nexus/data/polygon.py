@@ -41,10 +41,11 @@ class PolygonProvider(BaseDataProvider):
     
     BASE_URL = "https://api.polygon.io"
     
-    def __init__(self):
+    def __init__(self, settings_obj=None):
         super().__init__()
-        self._api_key = settings.polygon_api_key
-        self._client = httpx.AsyncClient(timeout=30.0)
+        _s = settings_obj or settings
+        self._api_key = getattr(_s, "polygon_api_key", None) or ""
+        self._client = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
         self._rate_limit_remaining = 5
         self._last_request_time: Optional[datetime] = None
     
@@ -93,79 +94,96 @@ class PolygonProvider(BaseDataProvider):
     # MARKET DATA
     # =========================================================================
     
-    async def get_quote(self, symbol: str) -> Quote:
+    async def get_quote(self, symbol: str) -> Optional[Quote]:
         """Get current/last quote for symbol."""
-        await self._rate_limit_wait()
-        
-        # Use snapshot endpoint for current data
-        response = await self._client.get(
-            f"{self.BASE_URL}/v2/snapshot/locale/us/markets/stocks/tickers/{symbol}",
-            params={"apiKey": self._api_key},
-        )
-        
-        if response.status_code != 200:
-            # Fallback to previous close
-            return await self._get_prev_close_quote(symbol)
-        
-        data = response.json()
-        ticker = data.get("ticker", {})
-        
-        day = ticker.get("day", {})
-        last_quote = ticker.get("lastQuote", {})
-        last_trade = ticker.get("lastTrade", {})
-        
         try:
-            from nexus.risk.kill_switch import get_kill_switch
-            kill_switch = get_kill_switch()
-            if kill_switch:
-                kill_switch.update_data_timestamp()
-        except Exception:
-            pass  # Don't crash on kill switch update failure
+            await self._rate_limit_wait()
 
-        return Quote(
-            symbol=symbol,
-            bid=float(last_quote.get("p", 0)) if last_quote else float(day.get("c", 0)),
-            ask=float(last_quote.get("P", 0)) if last_quote else float(day.get("c", 0)),
-            last=float(last_trade.get("p", 0)) if last_trade else float(day.get("c", 0)),
-            volume=int(day.get("v", 0)),
-            timestamp=datetime.now(),
-        )
+            # Use snapshot endpoint for current data
+            response = await self._client.get(
+                f"{self.BASE_URL}/v2/snapshot/locale/us/markets/stocks/tickers/{symbol}",
+                params={"apiKey": self._api_key},
+            )
+
+            if response.status_code != 200:
+                # Fallback to previous close
+                return await self._get_prev_close_quote(symbol)
+
+            data = response.json()
+            ticker = data.get("ticker", {})
+
+            day = ticker.get("day", {})
+            last_quote = ticker.get("lastQuote", {})
+            last_trade = ticker.get("lastTrade", {})
+
+            try:
+                from nexus.risk.kill_switch import get_kill_switch
+                kill_switch = get_kill_switch()
+                if kill_switch:
+                    kill_switch.update_data_timestamp()
+            except Exception:
+                pass  # Don't crash on kill switch update failure
+
+            return Quote(
+                symbol=symbol,
+                bid=float(last_quote.get("p", 0)) if last_quote else float(day.get("c", 0)),
+                ask=float(last_quote.get("P", 0)) if last_quote else float(day.get("c", 0)),
+                last=float(last_trade.get("p", 0)) if last_trade else float(day.get("c", 0)),
+                volume=int(day.get("v", 0)),
+                timestamp=datetime.now(),
+            )
+        except httpx.TimeoutException as e:
+            logger.warning(f"Timeout getting quote for {symbol}: {e}")
+            return None
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error getting quote for {symbol}: {e.response.status_code}")
+            return None
+        except httpx.RequestError as e:
+            logger.error(f"Request error getting quote for {symbol}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error getting quote for {symbol}: {e}")
+            return None
     
-    async def _get_prev_close_quote(self, symbol: str) -> Quote:
+    async def _get_prev_close_quote(self, symbol: str) -> Optional[Quote]:
         """Get previous close as fallback."""
-        response = await self._client.get(
-            f"{self.BASE_URL}/v2/aggs/ticker/{symbol}/prev",
-            params={"apiKey": self._api_key},
-        )
-        
-        if response.status_code != 200:
-            raise Exception(f"Failed to get quote for {symbol}")
-        
-        data = response.json()
-        results = data.get("results", [{}])
-        
-        if not results:
-            raise Exception(f"No data for {symbol}")
-        
-        bar = results[0]
-        close = float(bar.get("c", 0))
-        
         try:
-            from nexus.risk.kill_switch import get_kill_switch
-            kill_switch = get_kill_switch()
-            if kill_switch:
-                kill_switch.update_data_timestamp()
-        except Exception:
-            pass  # Don't crash on kill switch update failure
+            response = await self._client.get(
+                f"{self.BASE_URL}/v2/aggs/ticker/{symbol}/prev",
+                params={"apiKey": self._api_key},
+            )
 
-        return Quote(
-            symbol=symbol,
-            bid=close,
-            ask=close,
-            last=close,
-            volume=int(bar.get("v", 0)),
-            timestamp=datetime.now(),
-        )
+            if response.status_code != 200:
+                return None
+
+            data = response.json()
+            results = data.get("results", [{}])
+
+            if not results:
+                return None
+
+            bar = results[0]
+            close = float(bar.get("c", 0))
+
+            try:
+                from nexus.risk.kill_switch import get_kill_switch
+                kill_switch = get_kill_switch()
+                if kill_switch:
+                    kill_switch.update_data_timestamp()
+            except Exception:
+                pass  # Don't crash on kill switch update failure
+
+            return Quote(
+                symbol=symbol,
+                bid=close,
+                ask=close,
+                last=close,
+                volume=int(bar.get("v", 0)),
+                timestamp=datetime.now(),
+            )
+        except (httpx.TimeoutException, httpx.HTTPStatusError, httpx.RequestError, Exception) as e:
+            logger.debug(f"Prev close fallback failed for {symbol}: {e}")
+            return None
     
     async def get_bars(
         self,
@@ -173,65 +191,78 @@ class PolygonProvider(BaseDataProvider):
         timeframe: str,
         limit: int = 100,
         end_date: Optional[datetime] = None,
-    ) -> pd.DataFrame:
+    ) -> Optional[pd.DataFrame]:
         """
         Get OHLCV bars.
-        
+
         Args:
             symbol: Stock symbol (e.g., "SPY", "AAPL")
             timeframe: 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1w
             limit: Number of bars
             end_date: End date for historical data
         """
-        await self._rate_limit_wait()
-        
-        # Convert timeframe
-        multiplier, timespan = self._convert_timeframe(timeframe)
-        
-        # Calculate date range
-        end = end_date or datetime.now()
-        start = self._calculate_start_date(timeframe, limit, end)
-        
-        response = await self._client.get(
-            f"{self.BASE_URL}/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{start.strftime('%Y-%m-%d')}/{end.strftime('%Y-%m-%d')}",
-            params={
-                "apiKey": self._api_key,
-                "adjusted": "true",
-                "sort": "asc",
-                "limit": limit,
-            },
-        )
-        
-        if response.status_code != 200:
-            logger.warning(f"Polygon bars request failed: {response.status_code}")
-            return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        
-        data = response.json()
-        results = data.get("results", [])
-        
-        if not results:
-            return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        
         try:
-            from nexus.risk.kill_switch import get_kill_switch
-            kill_switch = get_kill_switch()
-            if kill_switch:
-                kill_switch.update_data_timestamp()
-        except Exception:
-            pass  # Don't crash on kill switch update failure
+            await self._rate_limit_wait()
 
-        df = pd.DataFrame([{
-            'timestamp': datetime.fromtimestamp(r.get("t", 0) / 1000),
-            'open': float(r.get("o", 0)),
-            'high': float(r.get("h", 0)),
-            'low': float(r.get("l", 0)),
-            'close': float(r.get("c", 0)),
-            'volume': int(r.get("v", 0)),
-            'vwap': float(r.get("vw", 0)),
-            'trades': int(r.get("n", 0)),
-        } for r in results])
-        
-        return df.tail(limit)
+            # Convert timeframe
+            multiplier, timespan = self._convert_timeframe(timeframe)
+
+            # Calculate date range
+            end = end_date or datetime.now()
+            start = self._calculate_start_date(timeframe, limit, end)
+
+            response = await self._client.get(
+                f"{self.BASE_URL}/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{start.strftime('%Y-%m-%d')}/{end.strftime('%Y-%m-%d')}",
+                params={
+                    "apiKey": self._api_key,
+                    "adjusted": "true",
+                    "sort": "asc",
+                    "limit": limit,
+                },
+            )
+
+            if response.status_code != 200:
+                logger.warning(f"Polygon bars request failed: {response.status_code}")
+                return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+
+            data = response.json()
+            results = data.get("results", [])
+
+            if not results:
+                return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+
+            try:
+                from nexus.risk.kill_switch import get_kill_switch
+                kill_switch = get_kill_switch()
+                if kill_switch:
+                    kill_switch.update_data_timestamp()
+            except Exception:
+                pass  # Don't crash on kill switch update failure
+
+            df = pd.DataFrame([{
+                'timestamp': datetime.fromtimestamp(r.get("t", 0) / 1000),
+                'open': float(r.get("o", 0)),
+                'high': float(r.get("h", 0)),
+                'low': float(r.get("l", 0)),
+                'close': float(r.get("c", 0)),
+                'volume': int(r.get("v", 0)),
+                'vwap': float(r.get("vw", 0)),
+                'trades': int(r.get("n", 0)),
+            } for r in results])
+
+            return df.tail(limit)
+        except httpx.TimeoutException as e:
+            logger.warning(f"Timeout getting bars for {symbol}: {e}")
+            return None
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error getting bars for {symbol}: {e.response.status_code}")
+            return None
+        except httpx.RequestError as e:
+            logger.error(f"Request error getting bars for {symbol}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error getting bars for {symbol}: {e}")
+            return None
     
     async def subscribe(
         self,
@@ -255,93 +286,105 @@ class PolygonProvider(BaseDataProvider):
     
     async def get_previous_close(self, symbol: str) -> Dict[str, Any]:
         """Get previous day's OHLCV."""
-        await self._rate_limit_wait()
-        
-        response = await self._client.get(
-            f"{self.BASE_URL}/v2/aggs/ticker/{symbol}/prev",
-            params={"apiKey": self._api_key},
-        )
-        
-        if response.status_code != 200:
+        try:
+            await self._rate_limit_wait()
+
+            response = await self._client.get(
+                f"{self.BASE_URL}/v2/aggs/ticker/{symbol}/prev",
+                params={"apiKey": self._api_key},
+            )
+
+            if response.status_code != 200:
+                return {}
+
+            data = response.json()
+            results = data.get("results", [{}])
+
+            if not results:
+                return {}
+
+            bar = results[0]
+            return {
+                "symbol": symbol,
+                "open": float(bar.get("o", 0)),
+                "high": float(bar.get("h", 0)),
+                "low": float(bar.get("l", 0)),
+                "close": float(bar.get("c", 0)),
+                "volume": int(bar.get("v", 0)),
+                "vwap": float(bar.get("vw", 0)),
+            }
+        except (httpx.TimeoutException, httpx.HTTPStatusError, httpx.RequestError, Exception) as e:
+            logger.warning(f"get_previous_close failed for {symbol}: {e}")
             return {}
-        
-        data = response.json()
-        results = data.get("results", [{}])
-        
-        if not results:
-            return {}
-        
-        bar = results[0]
-        return {
-            "symbol": symbol,
-            "open": float(bar.get("o", 0)),
-            "high": float(bar.get("h", 0)),
-            "low": float(bar.get("l", 0)),
-            "close": float(bar.get("c", 0)),
-            "volume": int(bar.get("v", 0)),
-            "vwap": float(bar.get("vw", 0)),
-        }
     
     async def get_gainers_losers(self, direction: str = "gainers") -> List[Dict[str, Any]]:
         """
         Get market gainers or losers.
-        
+
         Args:
             direction: "gainers" or "losers"
         """
-        await self._rate_limit_wait()
-        
-        response = await self._client.get(
-            f"{self.BASE_URL}/v2/snapshot/locale/us/markets/stocks/{direction}",
-            params={"apiKey": self._api_key},
-        )
-        
-        if response.status_code != 200:
+        try:
+            await self._rate_limit_wait()
+
+            response = await self._client.get(
+                f"{self.BASE_URL}/v2/snapshot/locale/us/markets/stocks/{direction}",
+                params={"apiKey": self._api_key},
+            )
+
+            if response.status_code != 200:
+                return []
+
+            data = response.json()
+            tickers = data.get("tickers", [])
+
+            return [{
+                "symbol": t.get("ticker"),
+                "change_pct": float(t.get("todaysChangePerc", 0)),
+                "change": float(t.get("todaysChange", 0)),
+                "price": float(t.get("day", {}).get("c", 0)),
+                "volume": int(t.get("day", {}).get("v", 0)),
+            } for t in tickers[:20]]
+        except (httpx.TimeoutException, httpx.HTTPStatusError, httpx.RequestError, Exception) as e:
+            logger.warning(f"get_gainers_losers failed ({direction}): {e}")
             return []
-        
-        data = response.json()
-        tickers = data.get("tickers", [])
-        
-        return [{
-            "symbol": t.get("ticker"),
-            "change_pct": float(t.get("todaysChangePerc", 0)),
-            "change": float(t.get("todaysChange", 0)),
-            "price": float(t.get("day", {}).get("c", 0)),
-            "volume": int(t.get("day", {}).get("v", 0)),
-        } for t in tickers[:20]]
     
     async def get_news(self, symbol: Optional[str] = None, limit: int = 10) -> List[Dict[str, Any]]:
         """Get news headlines."""
-        await self._rate_limit_wait()
-        
-        params = {
-            "apiKey": self._api_key,
-            "limit": limit,
-            "sort": "published_utc",
-        }
-        
-        if symbol:
-            params["ticker"] = symbol
-        
-        response = await self._client.get(
-            f"{self.BASE_URL}/v2/reference/news",
-            params=params,
-        )
-        
-        if response.status_code != 200:
+        try:
+            await self._rate_limit_wait()
+
+            params = {
+                "apiKey": self._api_key,
+                "limit": limit,
+                "sort": "published_utc",
+            }
+
+            if symbol:
+                params["ticker"] = symbol
+
+            response = await self._client.get(
+                f"{self.BASE_URL}/v2/reference/news",
+                params=params,
+            )
+
+            if response.status_code != 200:
+                return []
+
+            data = response.json()
+            results = data.get("results", [])
+
+            return [{
+                "title": n.get("title"),
+                "author": n.get("author"),
+                "published": n.get("published_utc"),
+                "url": n.get("article_url"),
+                "tickers": n.get("tickers", []),
+                "description": n.get("description", "")[:200],
+            } for n in results]
+        except (httpx.TimeoutException, httpx.HTTPStatusError, httpx.RequestError, Exception) as e:
+            logger.warning(f"get_news failed: {e}")
             return []
-        
-        data = response.json()
-        results = data.get("results", [])
-        
-        return [{
-            "title": n.get("title"),
-            "author": n.get("author"),
-            "published": n.get("published_utc"),
-            "url": n.get("article_url"),
-            "tickers": n.get("tickers", []),
-            "description": n.get("description", "")[:200],
-        } for n in results]
     
     # =========================================================================
     # TECHNICAL INDICATORS

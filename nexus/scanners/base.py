@@ -59,6 +59,12 @@ class BaseScanner(ABC):
         """
         if self.data is not None:
             quote = await self.data.get_quote(symbol)
+            if quote is None:
+                # Data provider error - use placeholder to avoid crash
+                placeholders = {
+                    "SPY": 500.0, "QQQ": 450.0, "IWM": 200.0, "ES": 5000.0, "NQ": 18000.0,
+                }
+                return placeholders.get(symbol, 100.0)
             return quote.last
 
         # Placeholder prices for testing
@@ -81,7 +87,10 @@ class BaseScanner(ABC):
         Otherwise return placeholder DataFrame for testing.
         """
         if self.data is not None:
-            return await self.data.get_bars(symbol, timeframe, limit)
+            bars = await self.data.get_bars(symbol, timeframe, limit)
+            if bars is None:
+                return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+            return bars
 
         # Placeholder DataFrame for testing
         import numpy as np

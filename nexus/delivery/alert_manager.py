@@ -120,70 +120,75 @@ class AlertManager:
         signal: NexusSignal,
         channels: Optional[List[str]] = None,
     ) -> DeliveryRecord:
-        """Send signal to specified channels (or all configured)."""
-        active = self._active_channels(channels)
-        channel_list = list(active.keys())
-
+        """Send signal to specified channels (or all configured). Failures never crash the caller."""
         record = DeliveryRecord(
             id=uuid.uuid4().hex,
             signal_id=getattr(signal, "signal_id", None),
-            channels=channel_list,
+            channels=[],
             status=DeliveryStatus.PENDING,
             results={},
         )
+        try:
+            active = self._active_channels(channels)
+            channel_list = list(active.keys())
+            record.channels = channel_list
 
-        if not active:
-            record.status = DeliveryStatus.FAILED
-            record.error = "No configured channels"
-            logger.warning("send_signal: no configured channels")
-            return record
+            if not active:
+                record.status = DeliveryStatus.FAILED
+                record.error = "No configured channels"
+                logger.warning("send_signal: no configured channels")
+                return record
 
-        tasks = [
-            self._deliver_signal(name, delivery, signal)
-            for name, delivery in active.items()
-        ]
-        results_list = await asyncio.gather(*tasks, return_exceptions=True)
+            tasks = [
+                self._deliver_signal(name, delivery, signal)
+                for name, delivery in active.items()
+            ]
+            results_list = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for i, (name, _) in enumerate(active.items()):
-            if i < len(results_list):
-                r = results_list[i]
-                if isinstance(r, Exception):
+            for i, (name, _) in enumerate(active.items()):
+                if i < len(results_list):
+                    r = results_list[i]
+                    if isinstance(r, Exception):
+                        record.results[name] = DeliveryResult(
+                            success=False,
+                            error_message=str(r),
+                        )
+                        self._stats["failed_deliveries"] += 1
+                    else:
+                        _, result = r
+                        record.results[name] = result
+                        if result.success:
+                            self._stats["successful_deliveries"] += 1
+                        else:
+                            self._stats["failed_deliveries"] += 1
+                else:
                     record.results[name] = DeliveryResult(
                         success=False,
-                        error_message=str(r),
+                        error_message="Missing result",
                     )
                     self._stats["failed_deliveries"] += 1
-                else:
-                    _, result = r
-                    record.results[name] = result
-                    if result.success:
-                        self._stats["successful_deliveries"] += 1
-                    else:
-                        self._stats["failed_deliveries"] += 1
-            else:
-                record.results[name] = DeliveryResult(
-                    success=False,
-                    error_message="Missing result",
-                )
-                self._stats["failed_deliveries"] += 1
 
-        successes = sum(1 for r in record.results.values() if r.success)
-        total = len(record.results)
-        if successes == total:
-            record.status = DeliveryStatus.SENT
-            self._stats["signals_sent"] += 1
-            if self._on_success:
-                self._on_success(record)
-        elif successes == 0:
+            successes = sum(1 for r in record.results.values() if r.success)
+            total = len(record.results)
+            if successes == total:
+                record.status = DeliveryStatus.SENT
+                self._stats["signals_sent"] += 1
+                if self._on_success:
+                    self._on_success(record)
+            elif successes == 0:
+                record.status = DeliveryStatus.FAILED
+                record.error = "All channels failed"
+                if self._on_failure:
+                    self._on_failure(record)
+            else:
+                record.status = DeliveryStatus.RETRYING
+                record.error = f"{total - successes}/{total} channels failed"
+                if self._on_partial:
+                    self._on_partial(record)
+        except Exception as e:
+            logger.error("Signal delivery failed: %s", e, exc_info=True)
             record.status = DeliveryStatus.FAILED
-            record.error = "All channels failed"
-            if self._on_failure:
-                self._on_failure(record)
-        else:
-            record.status = DeliveryStatus.RETRYING
-            record.error = f"{total - successes}/{total} channels failed"
-            if self._on_partial:
-                self._on_partial(record)
+            record.error = str(e)
 
         self._delivery_history.append(record)
         return record
@@ -211,71 +216,75 @@ class AlertManager:
         priority: AlertPriority = AlertPriority.NORMAL,
         channels: Optional[List[str]] = None,
     ) -> DeliveryRecord:
-        """Send alert to specified channels (or all configured)."""
-        active = self._active_channels(channels)
-        channel_list = list(active.keys())
-
+        """Send alert to specified channels (or all configured). Failures never crash the caller."""
         record = DeliveryRecord(
             id=uuid.uuid4().hex,
             signal_id=None,
-            channels=channel_list,
+            channels=[],
             status=DeliveryStatus.PENDING,
             results={},
         )
+        try:
+            active = self._active_channels(channels)
+            channel_list = list(active.keys())
+            record.channels = channel_list
 
-        if not active:
-            record.status = DeliveryStatus.FAILED
-            record.error = "No configured channels"
-            logger.warning("send_alert: no configured channels")
-            return record
+            if not active:
+                record.status = DeliveryStatus.FAILED
+                record.error = "No configured channels"
+                logger.warning("send_alert: no configured channels")
+                return record
 
-        tasks = [
-            self._deliver_alert(name, delivery, message, priority)
-            for name, delivery in active.items()
-        ]
-        results_list = await asyncio.gather(*tasks, return_exceptions=True)
+            tasks = [
+                self._deliver_alert(name, delivery, message, priority)
+                for name, delivery in active.items()
+            ]
+            results_list = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for i, (name, _) in enumerate(active.items()):
-            if i < len(results_list):
-                r = results_list[i]
-                if isinstance(r, Exception):
+            for i, (name, _) in enumerate(active.items()):
+                if i < len(results_list):
+                    r = results_list[i]
+                    if isinstance(r, Exception):
+                        record.results[name] = DeliveryResult(
+                            success=False,
+                            error_message=str(r),
+                        )
+                        self._stats["failed_deliveries"] += 1
+                    else:
+                        _, result = r
+                        record.results[name] = result
+                        if result.success:
+                            self._stats["successful_deliveries"] += 1
+                        else:
+                            self._stats["failed_deliveries"] += 1
+                else:
                     record.results[name] = DeliveryResult(
                         success=False,
-                        error_message=str(r),
+                        error_message="Missing result",
                     )
                     self._stats["failed_deliveries"] += 1
-                else:
-                    _, result = r
-                    record.results[name] = result
-                    if result.success:
-                        self._stats["successful_deliveries"] += 1
-                    else:
-                        self._stats["failed_deliveries"] += 1
+
+            successes = sum(1 for r in record.results.values() if r.success)
+            total = len(record.results)
+            if successes == total:
+                record.status = DeliveryStatus.SENT
+                self._stats["alerts_sent"] += 1
+                if self._on_success:
+                    self._on_success(record)
+            elif successes == 0:
+                record.status = DeliveryStatus.FAILED
+                record.error = "All channels failed"
+                if self._on_failure:
+                    self._on_failure(record)
             else:
-                record.results[name] = DeliveryResult(
-                    success=False,
-                    error_message="Missing result",
-                )
-                self._stats["failed_deliveries"] += 1
-
-        successes = sum(1 for r in record.results.values() if r.success)
-        total = len(record.results)
-        if successes == total:
-            record.status = DeliveryStatus.SENT
-            self._stats["alerts_sent"] += 1
-            if self._on_success:
-                self._on_success(record)
-        elif successes == 0:
+                record.status = DeliveryStatus.RETRYING
+                record.error = f"{total - successes}/{total} channels failed"
+                if self._on_partial:
+                    self._on_partial(record)
+        except Exception as e:
+            logger.error("Alert delivery failed: %s", e, exc_info=True)
             record.status = DeliveryStatus.FAILED
-            record.error = "All channels failed"
-            if self._on_failure:
-                self._on_failure(record)
-        else:
-            record.status = DeliveryStatus.RETRYING
-            record.error = f"{total - successes}/{total} channels failed"
-            if self._on_partial:
-                self._on_partial(record)
-
+            record.error = str(e)
         self._delivery_history.append(record)
         return record
 
