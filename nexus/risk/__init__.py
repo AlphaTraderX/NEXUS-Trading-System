@@ -25,6 +25,7 @@ from .correlation import (
 from .heat_manager import DynamicHeatManager
 from .kill_switch import KillSwitch
 from .position_sizer import DynamicPositionSizer
+from .state_persistence import RiskStatePersistence, get_risk_persistence
 
 __all__ = [
     "CircuitBreakerState",
@@ -47,4 +48,6 @@ __all__ = [
     "SmartCircuitBreaker",
     "SystemHealth",
     "TrackedPosition",
+    "RiskStatePersistence",
+    "get_risk_persistence",
 ]

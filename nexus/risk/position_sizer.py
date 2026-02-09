@@ -44,10 +44,10 @@ class DynamicPositionSizer:
 
     # Regime multipliers (MarketRegime enum)
     REGIME_MULTIPLIERS = {
-        MarketRegime.TRENDING_UP: 1.1,
-        MarketRegime.TRENDING_DOWN: 0.9,
+        MarketRegime.TRENDING_UP: 1.0,    # Not 1.1 - trade both directions equally
+        MarketRegime.TRENDING_DOWN: 1.0,  # Not 0.9 - trade both directions
         MarketRegime.RANGING: 1.0,
-        MarketRegime.VOLATILE: 0.6,
+        MarketRegime.VOLATILE: 0.5,       # Correct per spec - half size in volatile markets
     }
 
     def __init__(

@@ -102,11 +102,11 @@ class CorrelationMonitor:
     Monitors position correlation to prevent hidden concentration risk.
 
     KEY INSIGHT: 6 positions at 1% each doesn't mean 6% risk if they're
-    all correlated. With 0.85 correlation, effective risk could be 13%+.
+    all correlated. With 0.85 correlation, effective risk could be higher.
 
-    FORMULA (simplified):
-    Effective Risk = Nominal Risk × √(1 + (N-1) × Average Correlation)
-    per sector, where N = number of positions in that sector.
+    FORMULA (per spec):
+    Effective Risk = Nominal Risk × √(N × Average Correlation)
+    per sector, where N = number of positions, avg_corr = average pairwise correlation.
     """
 
     def __init__(self, settings: Any = None):
@@ -200,21 +200,37 @@ class CorrelationMonitor:
 
         nominal = sum(p.risk_pct for p in all_positions)
 
-        sector_risks: Dict[str, List[float]] = {}
+        # Group by sector keeping positions (for symbol -> correlation lookup)
+        sector_positions: Dict[str, List[PositionCorrelationInfo]] = {}
         for p in all_positions:
-            if p.sector not in sector_risks:
-                sector_risks[p.sector] = []
-            sector_risks[p.sector].append(p.risk_pct)
+            if p.sector not in sector_positions:
+                sector_positions[p.sector] = []
+            sector_positions[p.sector].append(p)
 
         effective = 0.0
-        for sector, risks in sector_risks.items():
-            n = len(risks)
-            sector_nominal = sum(risks)
+        for sector, positions_in_sector in sector_positions.items():
+            n = len(positions_in_sector)
+            sector_nominal = sum(p.risk_pct for p in positions_in_sector)
+            if n <= 0:
+                continue
             if n == 1:
                 effective += sector_nominal
             else:
-                avg_corr = 0.7
-                corr_factor = math.sqrt(1 + (n - 1) * avg_corr)
+                # Actual pairwise correlations in this sector
+                symbols = [p.symbol for p in positions_in_sector]
+                correlations: List[float] = []
+                for i, s1 in enumerate(symbols):
+                    for s2 in symbols[i + 1 :]:
+                        c = self.get_correlation(s1, s2)
+                        correlations.append(abs(c))
+                if len(correlations) > 0:
+                    avg_corr = sum(correlations) / len(correlations)
+                else:
+                    avg_corr = 0.5  # Default assumption when no data
+                if avg_corr <= 0:
+                    avg_corr = 0.1  # Minimum assumption to avoid math errors
+                # Effective Risk = Nominal Risk × √(N × Average Correlation)
+                corr_factor = math.sqrt(n * avg_corr)
                 effective += sector_nominal * corr_factor
 
         multiplier = effective / nominal if nominal > 0 else 1.0

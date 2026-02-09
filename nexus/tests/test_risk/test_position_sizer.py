@@ -83,13 +83,13 @@ def test_regime_multipliers(sizer):
         symbol="SPY",
     )
     r = sizer.calculate_size(**base, regime=MarketRegime.TRENDING_UP)
-    assert r.regime_multiplier == 1.1
+    assert r.regime_multiplier == 1.0  # Spec: trade both directions equally
     r = sizer.calculate_size(**base, regime=MarketRegime.TRENDING_DOWN)
-    assert r.regime_multiplier == 0.9
+    assert r.regime_multiplier == 1.0  # Spec: trade both directions
     r = sizer.calculate_size(**base, regime=MarketRegime.RANGING)
     assert r.regime_multiplier == 1.0
     r = sizer.calculate_size(**base, regime=MarketRegime.VOLATILE)
-    assert r.regime_multiplier == 0.6
+    assert r.regime_multiplier == 0.5  # Spec: half size in volatile markets
 
 
 def test_momentum_scaling(sizer):

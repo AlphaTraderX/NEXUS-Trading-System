@@ -30,6 +30,13 @@ def get_risk_persistence(state_path: str | None = None) -> "RiskStatePersistence
         return _impl
 
 
+def reset_risk_persistence() -> None:
+    """Reset the singleton (for tests). Next get_risk_persistence() will create a new instance."""
+    global _impl
+    with _lock:
+        _impl = None
+
+
 class RiskStatePersistence:
     """
     Persists circuit breaker status to disk so it survives restarts.

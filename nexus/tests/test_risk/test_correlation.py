@@ -157,11 +157,12 @@ def test_effective_risk_single_position(monitor):
 
 
 def test_effective_risk_correlated_positions(monitor):
-    """Correlated positions increase multiplier."""
+    """Correlated positions increase effective risk (use symbols with known pairwise correlation)."""
+    # AAPL, MSFT, QQQ are all pairwise highly correlated in HIGH_CORRELATION_PAIRS
     monitor.add_position("p1", "AAPL", Market.US_STOCKS, Direction.LONG, 1.0)
     monitor.add_position("p2", "MSFT", Market.US_STOCKS, Direction.LONG, 1.0)
     result = monitor.check_new_position(
-        "NVDA", Market.US_STOCKS, Direction.LONG, 1.0
+        "QQQ", Market.US_STOCKS, Direction.LONG, 1.0
     )
     assert result.nominal_risk_pct == 3.0
     assert result.effective_risk_pct > 3.0
