@@ -6,6 +6,7 @@ trade execution, and reconciliation.
 """
 
 from nexus.execution.signal_generator import SignalGenerator
+from nexus.execution.cooldown_manager import CooldownManager, get_cooldown_manager
 from nexus.execution.position_manager import (
     PositionManager,
     Position,
@@ -45,6 +46,9 @@ from nexus.execution.reconciliation import (
 __all__ = [
     # Signal Generator
     "SignalGenerator",
+    # Cooldown Manager
+    "CooldownManager",
+    "get_cooldown_manager",
     # Position Manager
     "PositionManager",
     "Position",

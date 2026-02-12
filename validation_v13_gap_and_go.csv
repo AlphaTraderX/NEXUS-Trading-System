@@ -1,0 +1,15 @@
+Edge,Symbol,Timeframe,Trades,Winners,Losers,Win%,PF,P&L,P&L%,MaxDD%,Sharpe,T-Stat,P-Value,Significant,Verdict,Reason
+asian_range,EUR/USD,1h,2,1,1,50.0,0.82,-24.16,-0.2,1.3,-1.13,-0.10,0.5320,False,INSUFFICIENT_DATA,Only 2 trades (need 30+)
+bollinger_touch,,,0,,,,,,,,,,,,NO_DATA,
+earnings_drift,,,0,,,,,,,,,,,,NO_DATA,
+gap_fill,SPY,1d,7,6,1,85.7,2.17,80.06,0.8,0.7,4.33,0.72,0.2489,False,INSUFFICIENT_DATA,Only 7 trades (need 30+)
+insider_cluster,SPY,1d,35,18,17,51.4,1.55,856.99,8.6,6.2,3.09,1.15,0.1287,False,VALID,All criteria met
+london_open,,,0,,,,,,,,,,,,NO_DATA,
+month_end,SPY,1d,28,13,15,46.4,1.31,333.87,3.3,2.7,1.86,0.62,0.2707,False,INSUFFICIENT_DATA,Only 28 trades (need 30+)
+ny_open,,,0,,,,,,,,,,,,NO_DATA,
+orb,,,0,,,,,,,,,,,,NO_DATA,
+overnight_premium,SPY+QQQ,1d,766,427,339,55.7,1.38,1055.34,10.6,2.5,1.88,3.28,0.0006,True,MARGINAL,Expected value 0.014% below 0.05%
+power_hour,,,0,,,,,,,,,,,,NO_DATA,
+rsi_extreme,SPY+QQQ,1d,80,54,26,67.5,1.82,455.83,4.6,2.0,3.36,1.89,0.0311,True,VALID,All criteria met
+turn_of_month,SPY,1d,33,20,13,60.6,1.35,381.85,3.8,2.6,2.05,0.74,0.2314,False,VALID,All criteria met
+vwap_deviation,SPY,1d,47,19,28,40.4,1.49,274.68,2.7,2.8,2.58,1.12,0.1352,False,MARGINAL,Win rate 40.4% below 45%

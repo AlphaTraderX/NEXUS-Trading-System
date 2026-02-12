@@ -1,0 +1,14 @@
+Edge,Symbol,Timeframe,Trades,Winners,Losers,Win%,PF,P&L,P&L%,MaxDD%,Sharpe,T-Stat,P-Value,Significant,Verdict,Reason
+asian_range,EUR/USD,1h,2,1,1,50.0,0.82,-24.16,-0.2,1.3,-1.13,-0.10,0.5320,False,INSUFFICIENT_DATA,Only 2 trades (need 30+)
+bollinger_touch,,,0,,,,,,,,,,,,NO_DATA,
+earnings_drift,,,0,,,,,,,,,,,,NO_DATA,
+gap_fill,SPY,5m,12,4,8,33.3,0.25,-114.04,-1.1,1.1,-8.24,-1.80,0.9501,False,INSUFFICIENT_DATA,Only 12 trades (need 30+)
+insider_cluster,SPY,1d,35,18,17,51.4,1.55,856.99,8.6,6.2,3.09,1.15,0.1287,False,VALID,All criteria met
+london_open,,,0,,,,,,,,,,,,NO_DATA,
+month_end,SPY,1d,28,13,15,46.4,1.31,333.87,3.3,2.7,1.86,0.62,0.2707,False,INSUFFICIENT_DATA,Only 28 trades (need 30+)
+ny_open,,,0,,,,,,,,,,,,NO_DATA,
+orb,SPY,5m,20,6,14,30.0,0.28,-517.52,-5.2,5.4,-7.26,-2.05,0.9726,False,INSUFFICIENT_DATA,Only 20 trades (need 30+)
+power_hour,,,0,,,,,,,,,,,,NO_DATA,
+rsi_extreme,SPY,1d,54,25,29,46.3,1.24,714.98,7.1,4.5,1.47,0.68,0.2503,False,INVALID,"Not statistically significant (p=0.250, need <0.1)"
+turn_of_month,SPY,1d,33,20,13,60.6,1.35,381.85,3.8,2.6,2.05,0.74,0.2314,False,INVALID,"Not statistically significant (p=0.231, need <0.2)"
+vwap_deviation,SPY,5m,13,2,11,15.4,0.23,-1198.65,-12.0,12.0,-10.87,-2.47,0.9853,False,INSUFFICIENT_DATA,Only 13 trades (need 30+)

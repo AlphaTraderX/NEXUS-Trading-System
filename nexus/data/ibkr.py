@@ -21,6 +21,7 @@ from ib_insync import MarketOrder, LimitOrder, StopOrder
 from nexus.config.settings import settings
 from .base import (
     BaseBroker,
+    ReconnectionMixin,
     Quote,
     AccountInfo,
     Position,
@@ -36,29 +37,30 @@ logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
 
 
-class IBKRProvider(BaseBroker):
+class IBKRProvider(ReconnectionMixin, BaseBroker):
     """
     Interactive Brokers data and execution provider.
-    
+
     Features:
     - Stocks, futures, forex, options
     - Real-time and historical data
     - Order execution with all order types
     - Handles daily reset window (23:45-00:45 ET)
+    - Auto-reconnection with exponential backoff
     """
-    
+
     # IBKR daily reset window (ET)
     RESET_START = time(23, 45)
     RESET_END = time(0, 45)
-    
+
     def __init__(self):
         super().__init__()
+        self._init_reconnection()
         self.ib = IB()
         self._host = settings.ibkr_host
         self._port = settings.ibkr_port
         self._client_id = settings.ibkr_client_id
         self._timeout = settings.ibkr_timeout
-        self._reconnect_attempts = 3
         self._subscriptions: Dict[str, int] = {}  # symbol -> reqId
         
     # =========================================================================
@@ -106,22 +108,17 @@ class IBKRProvider(BaseBroker):
             logger.info("Disconnected from IBKR")
     
     async def _reconnect(self) -> bool:
-        """Attempt to reconnect after disconnect."""
-        for attempt in range(self._reconnect_attempts):
-            logger.info(f"IBKR reconnect attempt {attempt + 1}/{self._reconnect_attempts}")
-            await asyncio.sleep(5 * (attempt + 1))  # Backoff
-            
-            if await self.connect():
-                return True
-        
-        logger.error("IBKR reconnection failed after all attempts")
-        return False
-    
+        """Attempt to reconnect after disconnect (IBKR-aware)."""
+        if self.is_reset_window():
+            logger.info("In IBKR reset window, waiting before reconnect")
+            await self._wait_for_reset_end()
+        return await self._reconnect_with_backoff()
+
     def _on_disconnected(self) -> None:
         """Handle disconnect event."""
         self._connected = False
         logger.warning("IBKR disconnected")
-        
+
         # Don't reconnect during reset window
         if not self.is_reset_window():
             asyncio.create_task(self._reconnect())

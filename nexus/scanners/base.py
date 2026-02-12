@@ -244,6 +244,9 @@ class BaseScanner(ABC):
             raw_score=0,
             adjusted_score=0,
             valid_until=valid_until,
+            confluence_count=1,
+            confluence_edges=[],
+            is_confluence=False,
         )
 
     @staticmethod

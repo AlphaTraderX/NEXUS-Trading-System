@@ -38,8 +38,10 @@ class PositionSize:
     score_multiplier: float
     regime_multiplier: float
     momentum_multiplier: float
-    heat_after_trade: float
-    can_trade: bool
+    kelly_multiplier: float = 1.0
+    kelly_adjusted_risk: float = 0.0
+    heat_after_trade: float = 0.0
+    can_trade: bool = True
     rejection_reason: Optional[str] = None
 
     def to_dict(self) -> dict:
@@ -259,7 +261,21 @@ class Opportunity(BaseModel):
 
     valid_until: Optional[datetime] = None
 
+    # Confluence tracking
+    confluence_count: int = Field(default=1, ge=1, description="How many edges fired on this symbol")
+    confluence_edges: List[EdgeType] = Field(default_factory=list, description="All edges that fired")
+    is_confluence: bool = Field(default=False, description="True if 2+ edges fired")
+
     model_config = ConfigDict(use_enum_values=True)
+
+    @property
+    def confluence_multiplier(self) -> float:
+        """Position size multiplier based on confluence count."""
+        if self.confluence_count >= 3:
+            return 2.0
+        if self.confluence_count == 2:
+            return 1.5
+        return 1.0
 
     @property
     def risk_reward_ratio(self) -> float:

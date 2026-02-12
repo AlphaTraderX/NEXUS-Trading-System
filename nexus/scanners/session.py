@@ -17,11 +17,14 @@ logger = logging.getLogger(__name__)
 
 class PowerHourScanner(BaseScanner):
     """
-    Power Hour scanner - Last hour of US trading (20:00-21:00 UK = 15:00-16:00 ET).
+    Power Hour scanner - momentum continuation from end-of-day institutional activity.
 
-    EDGE: U-shaped volume pattern - volume spikes at open and close of the hour
-    SIGNAL: Trade momentum continuation in direction of the day's trend
-    REQUIRED: U-shaped volume pattern confirmation (open/close of hour > middle)
+    EDGE: U-shaped intraday volume → institutions active at close → momentum continues
+    SIGNAL: Close in top/bottom 25% of day's range with volume confirmation
+    DIRECTION: Continuation (close near high → LONG, close near low → SHORT)
+
+    Reimplemented v15: daily bars with close-position logic (old 5m was -36% P&L).
+    Backtest engine (_signal_power_hour) has the corrected daily-bar logic.
     """
 
     INSTRUMENTS = {

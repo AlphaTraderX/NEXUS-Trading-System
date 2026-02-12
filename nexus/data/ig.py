@@ -19,19 +19,18 @@ import pandas as pd
 from nexus.config.settings import settings
 from .base import (
     BaseBroker,
+    ReconnectionMixin,
     Quote,
     AccountInfo,
     Position,
     Order,
     OrderResult,
-    OrderType,
-    OrderStatus,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class IGProvider(BaseBroker):
+class IGProvider(ReconnectionMixin, BaseBroker):
     """
     IG Markets spread betting provider.
     
@@ -69,6 +68,7 @@ class IGProvider(BaseBroker):
     
     def __init__(self):
         super().__init__()
+        self._init_reconnection()
         self._api_key = settings.ig_api_key
         self._username = settings.ig_username
         self._password = settings.ig_password
@@ -270,7 +270,6 @@ class IGProvider(BaseBroker):
         balance = account.get("balance", {})
         
         return AccountInfo(
-            account_id=self._account_id or "",
             balance=float(balance.get("balance", 0)),
             equity=float(balance.get("balance", 0)) + float(balance.get("profitLoss", 0)),
             margin_used=float(balance.get("deposit", 0)),
@@ -323,7 +322,7 @@ class IGProvider(BaseBroker):
                 current_price=current,
                 unrealized_pnl=pnl,
                 unrealized_pnl_pct=pnl_pct,
-                market_value=size * current,
+                margin_used=float(position_data.get("margin", 0)),
             ))
         
         return positions
@@ -349,14 +348,14 @@ class IGProvider(BaseBroker):
             "epic": epic,
             "direction": "BUY" if order.direction == "long" else "SELL",
             "size": order.size,
-            "orderType": "MARKET" if order.order_type == OrderType.MARKET else "LIMIT",
+            "orderType": "MARKET" if order.order_type == "market" else "LIMIT",
             "currencyCode": "GBP",
             "forceOpen": True,
             "guaranteedStop": False,
             "expiry": "DFB",  # Daily funded bet
         }
         
-        if order.limit_price and order.order_type == OrderType.LIMIT:
+        if order.limit_price and order.order_type == "limit":
             payload["level"] = order.limit_price
         
         if order.stop_loss:
@@ -376,10 +375,7 @@ class IGProvider(BaseBroker):
         if response.status_code not in [200, 201]:
             return OrderResult(
                 order_id="",
-                status=OrderStatus.REJECTED,
-                symbol=order.symbol,
-                direction=order.direction,
-                requested_size=order.size,
+                status="rejected",
                 message=response.text,
             )
         
@@ -400,10 +396,7 @@ class IGProvider(BaseBroker):
             
             return OrderResult(
                 order_id=confirm_data.get("dealId", deal_reference),
-                status=OrderStatus.FILLED if deal_status == "ACCEPTED" else OrderStatus.REJECTED,
-                symbol=order.symbol,
-                direction=order.direction,
-                requested_size=order.size,
+                status="filled" if deal_status == "ACCEPTED" else "rejected",
                 filled_size=order.size if deal_status == "ACCEPTED" else 0,
                 fill_price=float(confirm_data.get("level", 0)),
                 fill_time=datetime.now() if deal_status == "ACCEPTED" else None,
@@ -412,10 +405,7 @@ class IGProvider(BaseBroker):
         
         return OrderResult(
             order_id=deal_reference,
-            status=OrderStatus.PENDING,
-            symbol=order.symbol,
-            direction=order.direction,
-            requested_size=order.size,
+            status="pending",
             message="Awaiting confirmation",
         )
     
@@ -451,10 +441,7 @@ class IGProvider(BaseBroker):
             
             orders.append(OrderResult(
                 order_id=order_data.get("dealId", ""),
-                status=OrderStatus.PENDING,
-                symbol=self.convert_symbol_from_broker(market_data.get("epic", "")),
-                direction="long" if order_data.get("direction") == "BUY" else "short",
-                requested_size=float(order_data.get("size", 0)),
+                status="pending",
             ))
         
         return orders
@@ -478,10 +465,7 @@ class IGProvider(BaseBroker):
         if response.status_code != 200:
             return OrderResult(
                 order_id="",
-                status=OrderStatus.REJECTED,
-                symbol=symbol,
-                direction="close",
-                requested_size=0,
+                status="rejected",
                 message="Failed to get positions",
             )
         
@@ -510,20 +494,14 @@ class IGProvider(BaseBroker):
                 if close_response.status_code in [200, 201]:
                     return OrderResult(
                         order_id=deal_id,
-                        status=OrderStatus.FILLED,
-                        symbol=symbol,
-                        direction="close",
-                        requested_size=close_size,
+                        status="filled",
                         filled_size=close_size,
                         fill_time=datetime.now(),
                     )
         
         return OrderResult(
             order_id="",
-            status=OrderStatus.REJECTED,
-            symbol=symbol,
-            direction="close",
-            requested_size=0,
+            status="rejected",
             message="Position not found",
         )
     

@@ -1,0 +1,15 @@
+Edge,Symbol,Timeframe,Trades,Winners,Losers,Win%,PF,P&L,P&L%,MaxDD%,Sharpe,T-Stat,P-Value,Significant,Verdict,Reason,Tier_A,Tier_A_PnL,Tier_B,Tier_B_PnL,Tier_C,Tier_C_PnL,Tier_D,Tier_D_PnL
+asian_range,USD/JPY+AUD/USD,1h,32,12,20,37.5,1.33,15.06,0.2,0.1,1.75,0.62,0.2691,False,MARGINAL,"Not statistically significant (p=0.269, need <0.25)",0,0.00,0,0.00,32,15.06,0,0.00
+bollinger_touch,,,0,,,,,,,,,,,,NO_DATA,,,,,,,,,
+earnings_drift,,,0,,,,,,,,,,,,NO_DATA,,,,,,,,,
+gap_fill,SPY+NVDA+TSLA+AAPL+AMD+COIN+ROKU+SHOP+SQ+MARA,1d,152,78,74,51.3,1.50,3756.10,37.6,11.3,2.44,1.90,0.0299,True,VALID,All criteria met,59,2290.54,58,529.95,35,935.61,0,0.00
+insider_cluster,SPY+QQQ+AAPL+MSFT+NVDA+TSLA+AMD,1d,233,110,123,47.2,1.39,4477.72,44.8,22.5,2.30,2.21,0.0140,True,VALID,All criteria met,233,4477.72,0,0.00,0,0.00,0,0.00
+london_open,EUR/USD,15m,66,24,42,36.4,1.30,14.66,0.1,0.1,1.67,0.86,0.1977,False,MARGINAL,"Not statistically significant (p=0.198, need <0.15)",0,0.00,0,0.00,66,14.66,0,0.00
+month_end,SPY+QQQ,1d,56,25,31,44.6,1.10,84.02,0.8,2.7,0.64,0.30,0.3828,False,INVALID,"Not statistically significant (p=0.383, need <0.15); Win rate 44.6% below 45%; Expected value 0.015% below 0.05%",0,0.00,56,84.02,0,0.00,0,0.00
+ny_open,,,0,,,,,,,,,,,,NO_DATA,,,,,,,,,
+orb,,,0,,,,,,,,,,,,NO_DATA,,,,,,,,,
+overnight_premium,SPY+QQQ+TSLA+NVDA+AMD+AAPL+GOOGL+META+NFLX+CRM,1d,3471,1863,1608,53.7,1.35,8391.39,83.9,13.2,1.28,4.76,0.0000,True,MARGINAL,Expected value 0.024% below 0.05%,0,0.00,0,0.00,3471,8391.39,0,0.00
+power_hour,,,0,,,,,,,,,,,,NO_DATA,,,,,,,,,
+rsi_extreme,SPY+QQQ,1d,80,54,26,67.5,1.82,455.83,4.6,2.0,3.36,1.89,0.0311,True,VALID,All criteria met,0,0.00,80,455.83,0,0.00,0,0.00
+turn_of_month,SPY+QQQ+IWM,1d,99,49,50,49.5,1.07,291.59,2.9,9.9,0.50,0.31,0.3784,False,INVALID,"Not statistically significant (p=0.378, need <0.15); Expected value 0.029% below 0.05%",0,0.00,99,291.59,0,0.00,0,0.00
+vwap_deviation,SPY+QQQ+IWM,1d,142,57,85,40.1,1.31,651.21,6.5,4.2,1.77,1.33,0.0934,False,VALID,All criteria met,0,0.00,142,651.21,0,0.00,0,0.00

@@ -277,19 +277,17 @@ class TurnOfMonthScanner(BaseScanner):
 
 class MonthEndScanner(BaseScanner):
     """
-    Month-End Rebalancing scanner.
+    Month-End Rebalancing scanner - trade pension fund rebalancing flows.
 
-    EDGE: $7.5 trillion in pension fund flows create predictable moves
-    SOURCE: Institutional rebalancing patterns documented in academic research
-
+    EDGE: $7.5T pension funds rebalance to target allocations at month-end
     TIMING: Last 2 trading days of month
+    THRESHOLD: Month-to-date move > 2% (meaningful rebalancing needed)
 
-    DIRECTION:
-    - If stocks outperformed bonds this month: Pension funds SELL stocks (SHORT bias)
-    - If bonds outperformed stocks this month: Pension funds BUY stocks (LONG bias)
-    - For v1, we default to LONG bias (mean reversion into month-end weakness)
+    DIRECTION (contrarian):
+    - Strong month (MTD > +2%): Funds sell stocks to rebalance → SHORT
+    - Weak month (MTD < -2%): Funds buy stocks to rebalance → LONG
 
-    INSTRUMENTS: SPY, IWM (broad market ETFs most affected by rebalancing)
+    Backtest engine (_signal_month_end) has the inline contrarian logic.
     """
 
     def __init__(self, data_provider=None, settings=None):

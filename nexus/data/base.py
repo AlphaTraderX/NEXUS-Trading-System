@@ -4,10 +4,11 @@ NEXUS Base Data Provider
 Abstract base classes and data models for all data providers.
 """
 
+import asyncio
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 import pandas as pd
@@ -191,6 +192,88 @@ class BaseBroker(BaseDataProvider):
     async def close_all_positions(self) -> List[OrderResult]:
         """Close all open positions (emergency)."""
         pass
+
+
+class ReconnectionMixin:
+    """
+    Mixin for automatic broker reconnection.
+
+    Add to any BaseBroker subclass to get:
+    - ensure_connected() with automatic reconnect
+    - Exponential backoff (5s, 10s, 20s, 40s, 80s)
+    - Heartbeat tracking
+    """
+
+    _reconnect_attempts: int
+    _max_reconnect_attempts: int
+    _reconnect_delay: int
+    _last_heartbeat: datetime
+    _heartbeat_interval: int
+    _reconnecting: bool
+
+    def _init_reconnection(self) -> None:
+        """Initialize reconnection state. Call from subclass __init__."""
+        self._reconnect_attempts = 0
+        self._max_reconnect_attempts = 5
+        self._reconnect_delay = 5  # seconds, doubles each attempt
+        self._last_heartbeat = datetime.now(timezone.utc)
+        self._heartbeat_interval = 30
+        self._reconnecting = False
+
+    async def ensure_connected(self) -> bool:
+        """Ensure broker is connected, reconnect if needed."""
+        if self.is_connected:
+            self._last_heartbeat = datetime.now(timezone.utc)
+            return True
+
+        if self._reconnecting:
+            return False
+
+        return await self._reconnect_with_backoff()
+
+    async def _reconnect_with_backoff(self) -> bool:
+        """Attempt to reconnect to broker with exponential backoff."""
+        self._reconnecting = True
+
+        while self._reconnect_attempts < self._max_reconnect_attempts:
+            self._reconnect_attempts += 1
+            delay = self._reconnect_delay * (2 ** (self._reconnect_attempts - 1))
+
+            logger.warning(
+                f"Reconnecting to broker "
+                f"(attempt {self._reconnect_attempts}/{self._max_reconnect_attempts})..."
+            )
+
+            try:
+                if await self.connect():
+                    logger.info("Reconnected to broker successfully")
+                    self._reconnect_attempts = 0
+                    self._reconnecting = False
+                    return True
+            except Exception as e:
+                logger.error(f"Reconnection failed: {e}")
+
+            await asyncio.sleep(delay)
+
+        self._reconnecting = False
+        logger.critical(
+            f"Failed to reconnect after {self._max_reconnect_attempts} attempts"
+        )
+        return False
+
+    def seconds_since_heartbeat(self) -> float:
+        """Get seconds since last successful heartbeat."""
+        return (datetime.now(timezone.utc) - self._last_heartbeat).total_seconds()
+
+    async def heartbeat(self) -> bool:
+        """Send heartbeat / check connection."""
+        try:
+            if self.is_connected:
+                self._last_heartbeat = datetime.now(timezone.utc)
+                return True
+            return False
+        except Exception:
+            return False
 
 
 # Timeframe mapping utilities

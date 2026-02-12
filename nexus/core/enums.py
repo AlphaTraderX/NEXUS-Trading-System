@@ -40,6 +40,8 @@ class EdgeType(str, Enum):
     NY_OPEN = "ny_open"
     POWER_HOUR = "power_hour"
     ASIAN_RANGE = "asian_range"
+    OVERNIGHT_PREMIUM = "overnight_premium"
+    SENTIMENT_SPIKE = "sentiment_spike"
 
 
 class NexusMode(str, Enum):

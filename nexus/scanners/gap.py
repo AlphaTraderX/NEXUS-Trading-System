@@ -1,3 +1,16 @@
+"""
+Gap and Go Scanner - trade WITH gap momentum on high-volume breakaway gaps.
+
+Ported from validated backtest logic (v13-v26): _signal_gap_fill in engine.py.
+PF 1.41 (scored), +$5,991 on $10k (2022-2024), 152 trades, 51.3% WR.
+
+Key insight: breakaway gaps with high volume DON'T fill — they continue.
+The old fade strategy (SHORT on gap up) lost money. This trades WITH the gap.
+
+Filters: gap 1-5%, volume 150%+, day confirms gap direction, 20 SMA trend.
+Symbols: 10 validated high-beta stocks (mega caps and intl ETFs FAIL).
+"""
+
 import logging
 from datetime import datetime
 from typing import List, Optional
@@ -12,49 +25,52 @@ logger = logging.getLogger(__name__)
 
 class GapScanner(BaseScanner):
     """
-    Gap Fill scanner.
+    Gap and Go scanner - trade WITH gap momentum, not against it.
 
-    EDGE: 60-92% of small gaps fill within the same trading day
-    SIGNAL: Stock gaps up/down at open, trade toward previous close
+    VALIDATED: 152 trades, PF 1.41, +$5,991, Sharpe 2.49 (2022-2024)
+    SIGNAL: Gap 1-5% + volume 150%+ → trade in gap direction
+    DIRECTION: Gap UP → LONG, Gap DOWN → SHORT (momentum continuation)
 
-    Rules:
-    - Gap must be > 0.5% but < 3% (small gaps fill more reliably)
-    - Trade in direction of gap fill (gap up = SHORT, gap down = LONG)
-    - Target = previous close (the "fill")
-    - Best in first 30-60 minutes of session
+    Ported from BacktestEngine._signal_gap_fill() to ensure live matches backtest.
     """
 
+    # Validated symbol list — only high-beta stocks that sustain gap momentum.
+    # Mega caps (GOOGL/META/MSFT/AMZN) FAIL: they fill gaps (PF 1.06).
+    # International ETFs FAIL: gap-and-fill pattern (PF 0.91).
+    # Leveraged ETFs FAIL: 3x amplifies noise (PF 0.80).
     INSTRUMENTS = {
-        Market.US_STOCKS: ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "TSLA", "AMD", "META", "GOOGL", "AMZN"],
-        Market.UK_STOCKS: ["BP", "SHEL", "HSBA", "AZN", "LLOY"],
+        Market.US_STOCKS: [
+            "SPY", "NVDA", "TSLA", "AAPL", "AMD",
+            "COIN", "ROKU", "SHOP", "SQ", "MARA",
+        ],
     }
 
     def __init__(self, data_provider=None, settings=None):
         super().__init__(data_provider, settings)
         self.edge_type = EdgeType.GAP_FILL
-        self.markets = [Market.US_STOCKS, Market.UK_STOCKS]
+        self.markets = [Market.US_STOCKS]
         self.instruments = []
 
-        # Gap thresholds
-        self.min_gap_pct = 0.5   # Minimum gap size (0.5%)
-        self.max_gap_pct = 3.0   # Maximum gap size (3%) - larger gaps less likely to fill
+        # Validated parameters (do not change without re-backtesting)
+        self.min_gap_pct = 1.0    # Minimum gap size (%)
+        self.max_gap_pct = 5.0    # Maximum gap size (%)
+        self.min_volume_ratio = 1.5  # 150% of 20-day average volume
+        self.notional_pct = 16    # Position size (% of capital)
 
     def is_active(self, timestamp: Optional[datetime] = None) -> bool:
-        """
-        Gap scanner is most effective in first 30-60 minutes of session.
-        For now, active during market hours.
-        """
+        """Gap scanner runs on daily bars — active during US market hours."""
         return True
 
     async def scan(self) -> List[Opportunity]:
         """
-        Scan for gap fill opportunities.
+        Scan for Gap and Go opportunities.
 
-        Logic:
-        1. Compare today's open to yesterday's close
-        2. If gap > 0.5% and < 3%: potential opportunity
-        3. Gap UP = SHORT (fill down toward prev close)
-        4. Gap DOWN = LONG (fill up toward prev close)
+        Logic (validated v13-v26):
+        1. Gap must be 1-5% from prior close
+        2. Volume must be 150%+ of 20-day average (CRITICAL)
+        3. Day must close in gap direction (confirmation)
+        4. Trade WITH gap direction (not fade)
+        5. Dynamic scoring based on gap size + volume + trend
         """
         opportunities = []
 
@@ -73,64 +89,82 @@ class GapScanner(BaseScanner):
         return opportunities
 
     async def _scan_symbol(self, symbol: str, market: Market) -> Optional[Opportunity]:
-        """Scan a single symbol for gap fill opportunity."""
+        """Scan a single symbol for Gap and Go opportunity.
 
-        # Get daily bars (need 20 for proper 14-period ATR, and at least 2 for gap)
-        bars = await self.get_bars_safe(symbol, "1D", 20)
+        Ported from BacktestEngine._signal_gap_fill() — validated logic.
+        """
+        # Need 21 bars: 20 for volume average + current bar
+        bars = await self.get_bars_safe(symbol, "1D", 25)
 
-        if bars is None or len(bars) < 2:
+        if bars is None or len(bars) < 21:
             logger.debug(f"Gap insufficient data for {symbol}")
             return None
 
-        # Yesterday's close and today's open
-        prev_close = bars['close'].iloc[-2]
-        today_open = bars['open'].iloc[-1]
-        current_price = bars['close'].iloc[-1]
+        cur = bars.iloc[-1]
+        prev = bars.iloc[-2]
 
         # Calculate gap percentage
-        gap_pct = ((today_open - prev_close) / prev_close) * 100
+        if prev["close"] == 0:
+            return None
+        gap_pct = ((cur["open"] - prev["close"]) / prev["close"]) * 100
 
-        # Check if gap is in our sweet spot (0.5% to 3%)
-        abs_gap = abs(gap_pct)
-        if abs_gap < self.min_gap_pct or abs_gap > self.max_gap_pct:
-            return None  # Gap too small or too large
-
-        # Calculate ATR for stop placement (14-period; we fetch 20 bars for enough data)
-        atr = self._calculate_atr(bars, 14)
-        if atr is None or atr <= 0:
-            atr = current_price * 0.015  # Fallback: 1.5% of price
-
-        # Determine direction (FILL THE GAP)
-        if gap_pct > 0:
-            # Gap UP - price opened higher than prev close
-            # Trade SHORT to fill the gap (back down to prev close)
-            direction = Direction.SHORT
-            entry = current_price
-            target = prev_close  # Fill target is previous close
-            stop = current_price + (atr * 1.5)  # Stop above entry
-
-            # Check if gap already partially filled
-            fill_progress = (today_open - current_price) / (today_open - prev_close) * 100 if today_open != prev_close else 0
-        else:
-            # Gap DOWN - price opened lower than prev close
-            # Trade LONG to fill the gap (back up to prev close)
-            direction = Direction.LONG
-            entry = current_price
-            target = prev_close  # Fill target is previous close
-            stop = current_price - (atr * 1.5)  # Stop below entry
-
-            # Check if gap already partially filled
-            fill_progress = (current_price - today_open) / (prev_close - today_open) * 100 if prev_close != today_open else 0
-
-        # Skip if gap already mostly filled (>70%)
-        if fill_progress > 70:
-            logger.debug(f"Gap already {fill_progress:.0f}% filled for {symbol}")
+        # FILTER 1: Gap size must be 1-5%
+        if abs(gap_pct) < self.min_gap_pct or abs(gap_pct) > self.max_gap_pct:
             return None
 
-        # Calculate potential reward
-        potential_reward_pct = abs(target - entry) / entry * 100
+        # FILTER 2: Volume confirmation (CRITICAL — this is what makes it work)
+        if "volume" not in bars.columns:
+            return None
 
-        # Create opportunity
+        avg_volume = bars["volume"].iloc[-21:-1].mean()  # 20-day avg excluding today
+        cur_volume = cur["volume"]
+        volume_ratio = cur_volume / avg_volume if avg_volume > 0 else 0
+
+        if volume_ratio < self.min_volume_ratio:
+            return None
+
+        # FILTER 3: Day must close in gap direction (confirmation)
+        day_move = cur["close"] - cur["open"]
+
+        # Trend alignment: 20-day SMA direction matches gap direction
+        sma_20 = bars["close"].rolling(20).mean().iloc[-1]
+        trend_aligned = False
+        if not pd.isna(sma_20):
+            if gap_pct > 0 and cur["close"] > sma_20:
+                trend_aligned = True
+            elif gap_pct < 0 and cur["close"] < sma_20:
+                trend_aligned = True
+
+        # Dynamic score based on signal quality
+        score = self._calculate_gap_score(gap_pct, volume_ratio, trend_aligned)
+
+        # GAP UP + VOLUME → LONG (momentum continuation)
+        if gap_pct >= self.min_gap_pct:
+            if day_move < 0:  # Gap up but closed red = filling, skip
+                return None
+
+            entry = float(cur["close"])
+            stop = float(prev["close"]) * 0.995  # 0.5% below prior close
+            risk = entry - stop
+            target = entry + (risk * 2.0)  # 2:1 R:R
+            direction = Direction.LONG
+            gap_direction = "up"
+
+        # GAP DOWN + VOLUME → SHORT (momentum continuation)
+        elif gap_pct <= -self.min_gap_pct:
+            if day_move > 0:  # Gap down but closed green = filling, skip
+                return None
+
+            entry = float(cur["close"])
+            stop = float(prev["close"]) * 1.005  # 0.5% above prior close
+            risk = stop - entry
+            target = entry - (risk * 2.0)  # 2:1 R:R
+            direction = Direction.SHORT
+            gap_direction = "down"
+
+        else:
+            return None
+
         opp = self.create_opportunity(
             symbol=symbol,
             market=market,
@@ -139,45 +173,76 @@ class GapScanner(BaseScanner):
             stop_loss=stop,
             take_profit=target,
             edge_data={
+                "strategy": "gap_and_go",
                 "gap_pct": round(gap_pct, 2),
-                "gap_direction": "UP" if gap_pct > 0 else "DOWN",
-                "prev_close": round(prev_close, 4),
-                "today_open": round(today_open, 4),
-                "current_price": round(current_price, 4),
-                "fill_progress_pct": round(fill_progress, 1),
-                "potential_reward_pct": round(potential_reward_pct, 2),
-                "atr": round(atr, 4),
-            }
+                "volume_ratio": round(volume_ratio, 2),
+                "day_move_pct": round((day_move / cur["open"]) * 100, 2),
+                "gap_direction": gap_direction,
+                "trend_aligned": trend_aligned,
+                "notional_pct": self.notional_pct,
+                "score": score,
+            },
         )
+        # Set raw_score so the orchestrator deduplicator picks highest-quality signal
+        opp.raw_score = score
 
         logger.info(
-            f"Gap opportunity: {symbol} {direction.value} | "
-            f"Gap {gap_pct:+.2f}% | Fill progress: {fill_progress:.0f}% | "
-            f"Entry={entry:.2f} Target={target:.2f}"
+            f"Gap and Go: {symbol} {direction.value} | "
+            f"Gap {gap_pct:+.1f}% | Vol {volume_ratio:.1f}x | "
+            f"Score {score} | Entry={entry:.2f} Stop={stop:.2f} Target={target:.2f}"
         )
 
         return opp
 
-    def _calculate_atr(self, bars: pd.DataFrame, period: int = 14) -> Optional[float]:
-        """Calculate ATR with proper period."""
-        if len(bars) < period + 1:
-            avg_price = bars["close"].mean()
-            return float(avg_price * 0.015)  # 1.5% fallback when not enough data
+    @staticmethod
+    def _calculate_gap_score(
+        gap_pct: float,
+        volume_ratio: float,
+        trend_aligned: bool,
+    ) -> int:
+        """Dynamic scoring for gap signals based on signal quality.
 
-        high = bars["high"]
-        low = bars["low"]
-        close = bars["close"].shift(1)
+        Ported from BacktestEngine._calculate_gap_score() — validated logic.
 
-        tr1 = high - low
-        tr2 = abs(high - close)
-        tr3 = abs(low - close)
+        Factors:
+        - Gap size (sweet spot 2-3.5%)
+        - Volume ratio (higher = stronger confirmation)
+        - Trend alignment (20-day SMA direction matches gap)
 
-        true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = true_range.rolling(window=period).mean().iloc[-1]
+        Returns score 0-100 mapping to tiers:
+          A(80+)=1.5x, B(65-79)=1.25x, C(50-64)=1.0x, D(40-49)=0.5x, F(<40)=skip
 
-        if pd.isna(atr):
-            return float(bars["close"].iloc[-1] * 0.015)
-        return float(atr)
+        Base=35 ensures weakest valid signals (1% gap, 1.5x vol) land in C-tier
+        (no amplification), preventing drawdown amplification on marginal signals.
+        """
+        base_score = 35
+
+        # Gap size scoring (sweet spot is 2-3.5%)
+        abs_gap = abs(gap_pct)
+        if 2.0 <= abs_gap <= 3.5:
+            base_score += 25
+        elif 1.0 <= abs_gap < 2.0:
+            base_score += 15
+        elif 3.5 < abs_gap <= 5.0:
+            base_score += 5
+        else:
+            base_score -= 10
+
+        # Volume confirmation
+        if volume_ratio >= 2.0:
+            base_score += 15
+        elif volume_ratio >= 1.5:
+            base_score += 10
+        elif volume_ratio >= 1.2:
+            base_score += 5
+        elif volume_ratio < 0.8:
+            base_score -= 10
+
+        # Trend alignment bonus
+        if trend_aligned:
+            base_score += 10
+
+        return max(0, min(100, base_score))
 
     def _get_instruments(self, market: Market) -> List[str]:
         """Get instruments to scan for a market."""

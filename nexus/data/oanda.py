@@ -18,6 +18,7 @@ import pandas as pd
 
 from .base import (
     BaseBroker,
+    ReconnectionMixin,
     Quote,
     AccountInfo,
     Position,
@@ -31,7 +32,7 @@ logger = logging.getLogger(__name__)
 UTC = timezone.utc
 
 
-class OANDAProvider(BaseBroker):
+class OANDAProvider(ReconnectionMixin, BaseBroker):
     """
     OANDA v20 API provider for forex trading.
     
@@ -78,13 +79,14 @@ class OANDAProvider(BaseBroker):
     ):
         """
         Initialize OANDA provider.
-        
+
         Args:
             api_key: OANDA API token
             account_id: OANDA account ID (e.g., "101-004-12345678-001")
             practice: Use practice/demo environment (default True)
         """
         super().__init__()
+        self._init_reconnection()
         self.api_key = api_key
         self.account_id = account_id
         self.practice = practice

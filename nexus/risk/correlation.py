@@ -6,14 +6,19 @@ calculates correlation-adjusted (effective) portfolio risk, and blocks or warns
 when limits are approached.
 """
 
+import asyncio
+import logging
 import math
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from nexus.config.settings import get_settings
 from nexus.core.enums import Direction, Market
 from nexus.core.models import CorrelationCheckResult
+
+logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
 # Sector mapping (symbol -> sector or currency bucket)
@@ -125,6 +130,12 @@ class CorrelationMonitor:
         )
         self._positions: Dict[str, PositionCorrelationInfo] = {}
         self._lock = threading.RLock()
+
+        # Dynamic correlation state
+        self._correlation_cache: Dict[str, float] = {}
+        self._last_recalc: Optional[datetime] = None
+        self._recalc_running = False
+        self._recalc_task: Optional[asyncio.Task] = None
 
     def add_position(
         self,
@@ -417,6 +428,194 @@ class CorrelationMonitor:
             "high_correlation_pairs": high_correlation_pairs,
             "warnings": warnings,
         }
+
+    # -----------------------------------------------------------------
+    # Dynamic / real-time correlation methods
+    # -----------------------------------------------------------------
+
+    async def _calculate_correlation(self, sym1: str, sym2: str) -> float:
+        """
+        Calculate correlation between two symbols.
+
+        Override this method to pull live data from a market data provider.
+        Default implementation falls back to the static lookup table.
+        """
+        return self.get_correlation(sym1, sym2)
+
+    async def recalculate_all_correlations(self) -> Dict[str, float]:
+        """
+        Recalculate correlation between all open positions.
+        Call this periodically (e.g., every hour) or after adding positions.
+
+        Returns:
+            {"pair_key": correlation_value}
+        """
+        with self._lock:
+            positions = list(self._positions.values())
+
+        if len(positions) < 2:
+            return {}
+
+        symbols = list(set(p.symbol for p in positions))
+        correlations: Dict[str, float] = {}
+
+        for i, sym1 in enumerate(symbols):
+            for sym2 in symbols[i + 1 :]:
+                try:
+                    corr = await self._calculate_correlation(sym1, sym2)
+                    pair_key = f"{sym1}_{sym2}"
+                    correlations[pair_key] = corr
+
+                    # Alert if correlation spiked
+                    if abs(corr) > 0.85:
+                        logger.warning(
+                            f"High correlation detected: {sym1} <-> {sym2} = {corr:.2f}"
+                        )
+                except Exception as e:
+                    logger.debug(
+                        f"Could not calculate correlation {sym1}/{sym2}: {e}"
+                    )
+
+        self._correlation_cache = correlations
+        self._last_recalc = datetime.now(timezone.utc)
+
+        return correlations
+
+    def get_effective_portfolio_risk(self) -> dict:
+        """
+        Calculate effective portfolio risk accounting for correlations.
+
+        Formula: Effective Risk = Nominal Risk * sqrt(N * Average Correlation)
+
+        Returns:
+            {
+                "nominal_risk": float,
+                "average_correlation": float,
+                "correlation_factor": float,
+                "effective_risk": float,
+                "warning": str or None,
+            }
+        """
+        with self._lock:
+            positions = list(self._positions.values())
+
+        if not positions:
+            return {"nominal_risk": 0, "effective_risk": 0}
+
+        # Sum nominal risk
+        nominal_risk = sum(p.risk_pct for p in positions)
+
+        n = len(positions)
+
+        if n < 2 or not self._correlation_cache:
+            return {
+                "nominal_risk": nominal_risk,
+                "average_correlation": 0,
+                "correlation_factor": 1.0,
+                "effective_risk": nominal_risk,
+            }
+
+        # Calculate average absolute correlation
+        correlations = list(self._correlation_cache.values())
+        avg_corr = (
+            sum(abs(c) for c in correlations) / len(correlations)
+            if correlations
+            else 0
+        )
+
+        # Correlation factor: sqrt(N * avg_correlation)
+        # This approximates how correlated moves amplify risk
+        corr_factor = (n * avg_corr) ** 0.5 if avg_corr > 0 else 1.0
+
+        effective_risk = nominal_risk * corr_factor
+
+        warning = None
+        if effective_risk > nominal_risk * 1.5:
+            warning = f"Correlation amplifying risk by {corr_factor:.1f}x"
+
+        return {
+            "nominal_risk": nominal_risk,
+            "position_count": n,
+            "average_correlation": round(avg_corr, 3),
+            "correlation_factor": round(corr_factor, 2),
+            "effective_risk": round(effective_risk, 2),
+            "risk_amplification": round((corr_factor - 1) * 100, 1),
+            "warning": warning,
+        }
+
+    def should_block_new_position(
+        self, symbol: str, risk_amount: float, max_effective_risk: float
+    ) -> dict:
+        """
+        Check if adding a new position would exceed effective risk limits.
+
+        Args:
+            symbol: Symbol to add
+            risk_amount: Risk amount of new position
+            max_effective_risk: Maximum allowed effective risk
+
+        Returns:
+            {
+                "allowed": bool,
+                "reason": str,
+                "current_effective_risk": float,
+                "projected_effective_risk": float,
+            }
+        """
+        current = self.get_effective_portfolio_risk()
+        current_effective = current.get("effective_risk", 0)
+
+        # Estimate correlation with existing positions
+        # Assume new position has average correlation with existing
+        avg_corr = current.get("average_correlation", 0.5)
+
+        # Project new effective risk (simplified)
+        new_nominal = current.get("nominal_risk", 0) + risk_amount
+        new_n = current.get("position_count", 0) + 1
+        new_corr_factor = (new_n * avg_corr) ** 0.5 if avg_corr > 0 else 1.0
+        projected_effective = new_nominal * new_corr_factor
+
+        if projected_effective > max_effective_risk:
+            return {
+                "allowed": False,
+                "reason": f"Effective risk would be {projected_effective:.0f} > max {max_effective_risk:.0f}",
+                "current_effective_risk": current_effective,
+                "projected_effective_risk": projected_effective,
+            }
+
+        return {
+            "allowed": True,
+            "reason": "Within limits",
+            "current_effective_risk": current_effective,
+            "projected_effective_risk": projected_effective,
+        }
+
+    async def start_periodic_recalc(self, interval_seconds: int = 3600) -> None:
+        """Start periodic correlation recalculation."""
+        self._recalc_running = True
+
+        async def recalc_loop():
+            while self._recalc_running:
+                try:
+                    await self.recalculate_all_correlations()
+                    risk = self.get_effective_portfolio_risk()
+                    if risk.get("warning"):
+                        logger.warning(f"Correlation warning: {risk['warning']}")
+                except Exception as e:
+                    logger.error(f"Correlation recalc failed: {e}")
+                await asyncio.sleep(interval_seconds)
+
+        self._recalc_task = asyncio.create_task(recalc_loop())
+
+    async def stop_periodic_recalc(self) -> None:
+        """Stop periodic recalculation."""
+        self._recalc_running = False
+        if self._recalc_task:
+            self._recalc_task.cancel()
+            try:
+                await self._recalc_task
+            except asyncio.CancelledError:
+                pass
 
     def clear_positions(self) -> None:
         """Clear all tracked positions."""

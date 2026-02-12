@@ -28,6 +28,7 @@ from nexus.execution.order_manager import (
     OrderManager,
 )
 from nexus.core.models import NexusSignal
+from nexus.risk.slippage_tracker import SlippageTracker
 from nexus.storage.service import get_storage_service
 
 
@@ -542,8 +543,9 @@ class TradeExecutor:
     handles retries, and maintains execution state.
     """
 
-    def __init__(self, order_manager: OrderManager):
+    def __init__(self, order_manager: OrderManager, slippage_tracker: Optional[SlippageTracker] = None):
         self.order_manager = order_manager
+        self.slippage_tracker = slippage_tracker or SlippageTracker()
         self._brokers: Dict[str, BaseBrokerExecutor] = {}
         self._market_broker_map: Dict[Market, str] = {}
         self._default_broker: Optional[str] = None
@@ -747,6 +749,20 @@ class TradeExecutor:
         )
 
         self._execution_stats["orders_filled"] += 1
+
+        # Record slippage for feedback loop
+        if result.fill_price and order.expected_price:
+            try:
+                direction = "long" if order.side == OrderSide.BUY else "short"
+                self.slippage_tracker.record_execution(
+                    symbol=order.symbol,
+                    market=order.market,
+                    expected_price=order.expected_price,
+                    actual_price=result.fill_price,
+                    direction=direction,
+                )
+            except Exception as e:
+                logger.debug(f"Slippage recording failed: {e}")
 
         # Log trade to database
         try:

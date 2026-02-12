@@ -33,6 +33,7 @@ from nexus.core.enums import (
     MarketRegime,
 )
 from nexus.intelligence.cost_engine import CostEngine, CostBreakdown
+from nexus.execution.cooldown_manager import get_cooldown_manager
 from nexus.risk.position_sizer import DynamicPositionSizer
 from nexus.risk.heat_manager import DynamicHeatManager
 from nexus.risk.circuit_breaker import SmartCircuitBreaker
@@ -154,6 +155,7 @@ class SignalGenerator:
         EdgeType.LONDON_OPEN: 0.12,
         EdgeType.NY_OPEN: 0.12,
         EdgeType.EARNINGS_DRIFT: 0.20,
+        EdgeType.SENTIMENT_SPIKE: 0.15,
     }
 
     # Estimated hold time by edge type (in days)
@@ -171,6 +173,7 @@ class SignalGenerator:
         EdgeType.LONDON_OPEN: 0.5,
         EdgeType.NY_OPEN: 0.5,
         EdgeType.EARNINGS_DRIFT: 5.0,
+        EdgeType.SENTIMENT_SPIKE: 1.0,
     }
 
     # Signal validity duration by edge type (in hours)
@@ -188,6 +191,7 @@ class SignalGenerator:
         EdgeType.LONDON_OPEN: 2,
         EdgeType.NY_OPEN: 2,
         EdgeType.EARNINGS_DRIFT: 24,
+        EdgeType.SENTIMENT_SPIKE: 4,
     }
 
     def __init__(
@@ -330,6 +334,32 @@ class SignalGenerator:
             self._reject("correlation", reason, details)
             return None
 
+        # Step 4b: Economic Calendar / News Filter
+        news_size_multiplier = 1.0
+        try:
+            from nexus.data.forex_factory import get_forex_factory_client
+
+            ff = get_forex_factory_client()
+            news_check = await ff.is_safe_to_trade(opp.symbol)
+
+            if not news_check.get("safe", True):
+                self._reject(
+                    "news_filter",
+                    f"High-impact news: {news_check.get('reason', 'upcoming event')}",
+                    {"minutes_until": news_check.get("minutes_until")},
+                )
+                return None
+
+            if news_check.get("reduce_size", False):
+                news_size_multiplier = 0.5
+                logger.info(
+                    "News filter: reducing size 50%% for %s - %s",
+                    opp.symbol,
+                    news_check.get("reason", ""),
+                )
+        except Exception as e:
+            logger.debug("News check failed (continuing): %s", e)
+
         # Step 5: Calculate Position Size
         position_result = self.position_sizer.calculate_size(
             starting_balance=account_state.starting_balance,
@@ -350,8 +380,9 @@ class SignalGenerator:
             self._reject("position_size", reason, details)
             return None
 
-        risk_pct = _get(position_result, "risk_pct", 1.0) * size_multiplier
-        risk_amount = _get(position_result, "risk_amount", 0.0) * size_multiplier
+        combined_multiplier = size_multiplier * news_size_multiplier
+        risk_pct = _get(position_result, "risk_pct", 1.0) * combined_multiplier
+        risk_amount = _get(position_result, "risk_amount", 0.0) * combined_multiplier
         stop_distance_pct = abs(opp.entry_price - opp.stop_loss) / opp.entry_price if opp.entry_price else 0
         position_value = risk_amount / stop_distance_pct if stop_distance_pct > 0 else 0
 
@@ -445,6 +476,10 @@ class SignalGenerator:
             getattr(signal.tier, "value", signal.tier),
             signal.net_expected,
         )
+
+        # Record cooldown
+        cooldown = get_cooldown_manager()
+        cooldown.record_signal(signal.symbol, opp_direction, primary_edge)
 
         # Save signal to database
         try:

@@ -5,6 +5,7 @@ Scores opportunities 0-100 for signal generation.
 SCORING BREAKDOWN:
 - Primary edge: 30-40 points max
 - Secondary edges: 5-15 points each (up to 25 total)
+- Confluence bonus: 10-20 flat + 60% per extra edge
 - Trend alignment: up to 15 points
 - Volume confirmation: up to 10 points
 - Regime alignment: up to 10 points
@@ -13,7 +14,7 @@ SCORING BREAKDOWN:
 """
 
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from nexus.core.enums import EdgeType, Direction, MarketRegime
 from nexus.core.models import Opportunity
@@ -51,6 +52,7 @@ class OpportunityScorer:
     SCORING BREAKDOWN:
     - Primary edge: 30-40 points max
     - Secondary edges: 5-15 points each (up to 25 total)
+    - Confluence bonus: 10-20 flat + 60% per extra edge
     - Trend alignment: up to 15 points
     - Volume confirmation: up to 10 points
     - Regime alignment: up to 10 points
@@ -128,7 +130,30 @@ class OpportunityScorer:
                 f"Secondary edges ({len(secondary_edges[:3])}): +{int(secondary_score)}"
             )
 
-        # 3. Trend alignment (max 15 points)
+        # 3. Confluence bonus (when multiple primary edges fire)
+        confluence_score = 0
+        if getattr(opportunity, "is_confluence", False):
+            confluence_edges = getattr(opportunity, "confluence_edges", []) or []
+            confluence_count = getattr(opportunity, "confluence_count", 1)
+
+            # Each extra edge adds significant points (more than secondary)
+            for edge in confluence_edges[1:]:
+                e = EdgeType(edge) if isinstance(edge, str) else edge
+                edge_base = self.EDGE_BASE_SCORES.get(e, 10)
+                # Confluence edges worth 60% (vs 40% for secondary)
+                confluence_score += edge_base * 0.6
+
+            # Flat confluence bonus
+            if confluence_count == 2:
+                confluence_score += 10
+                factors.append(f"2-edge confluence: +{confluence_score:.0f}")
+            elif confluence_count >= 3:
+                confluence_score += 20
+                factors.append(f"{confluence_count}-edge confluence: +{confluence_score:.0f}")
+
+        score += int(confluence_score)
+
+        # 4. Trend alignment (max 15 points)
         alignment = trend_alignment.get("alignment", "NEUTRAL")
         direction = opportunity.direction
         if isinstance(direction, str):
@@ -148,7 +173,7 @@ class OpportunityScorer:
         elif alignment == "NEUTRAL":
             factors.append("Neutral trend: +0")
 
-        # 4. Volume confirmation (max 10 points)
+        # 5. Volume confirmation (max 10 points)
         if volume_ratio >= 2.0:
             score += 10
             factors.append(f"High volume ({volume_ratio:.1f}x): +10")
@@ -161,14 +186,14 @@ class OpportunityScorer:
         else:
             factors.append(f"Normal volume ({volume_ratio:.1f}x): +0")
 
-        # 5. Regime alignment (max 10 points)
+        # 6. Regime alignment (max 10 points)
         if primary_edge and self._regime_aligns(primary_edge, regime):
             score += 10
             factors.append(f"Regime aligned ({regime.value}): +10")
         else:
             factors.append(f"Regime neutral ({regime.value}): +0")
 
-        # 6. Risk/Reward ratio (max 10 points)
+        # 7. Risk/Reward ratio (max 10 points)
         rr = opportunity.risk_reward_ratio
         if rr >= 3.0:
             score += 10
@@ -182,7 +207,7 @@ class OpportunityScorer:
         else:
             factors.append(f"Poor R:R ({rr:.1f}:1): +0")
 
-        # 7. Cost efficiency (max 5 points)
+        # 8. Cost efficiency (max 5 points)
         cost_ratio = cost_analysis.get("cost_ratio", 100)
         if cost_ratio < 20:
             score += 5
@@ -196,9 +221,9 @@ class OpportunityScorer:
         # Cap at 100
         score = min(score, 100)
 
-        # Determine tier
+        # Determine tier and position multiplier
         tier = self._get_tier(score)
-        multiplier = self.TIER_MULTIPLIERS[tier]
+        multiplier = self._get_position_multiplier(score, opportunity)
 
         return ScoredOpportunity(
             opportunity=opportunity,
@@ -219,6 +244,34 @@ class OpportunityScorer:
             return "D"
         else:
             return "F"
+
+    def _get_position_multiplier(
+        self, score: int, opportunity: Optional[Opportunity] = None
+    ) -> float:
+        """
+        Compute position size multiplier from score + confluence.
+
+        Score-based tiers set the base, confluence amplifies it, capped at 2.5x.
+        """
+        if score >= 85:
+            base_multiplier = 1.5
+        elif score >= 75:
+            base_multiplier = 1.25
+        elif score >= 65:
+            base_multiplier = 1.0
+        elif score >= 50:
+            base_multiplier = 0.75
+        elif score >= 40:
+            base_multiplier = 0.5
+        else:
+            return 0.0
+
+        # Apply confluence multiplier if present
+        if opportunity and getattr(opportunity, "is_confluence", False):
+            base_multiplier *= opportunity.confluence_multiplier
+
+        # Cap at 2.5x total
+        return min(base_multiplier, 2.5)
 
     def _check_trend_direction_match(self, alignment: str, direction: Direction) -> bool:
         """Check if trend alignment matches trade direction."""

@@ -39,6 +39,13 @@ class Settings(BaseSettings):
     ibkr_timeout: float = 60.0
     order_timeout_seconds: float = 30.0
 
+    # Trading mode and account
+    mode: str = "standard"  # conservative | standard | aggressive | maximum
+    starting_balance: float = 100_000.0
+    currency: str = "USD"
+    max_positions: int = 8
+    min_score_to_trade: float = 50.0
+
     # Risk / position sizing
     base_risk_pct: float = 1.0
     max_risk_pct: float = 2.0
@@ -77,6 +84,11 @@ class Settings(BaseSettings):
     data_stale_threshold_seconds: int = 30
     kill_switch_cooldown_minutes: int = 60  # Minimum time before reset allowed
 
+    def get_mode_multipliers(self) -> dict:
+        """Return risk/heat multipliers for current mode (for API display)."""
+        from nexus.config.settings import MODE_MULTIPLIERS
+        return MODE_MULTIPLIERS.get(self.mode, MODE_MULTIPLIERS["standard"])
+
 
 settings = Settings()
 
@@ -84,3 +96,12 @@ settings = Settings()
 def get_settings() -> Settings:
     """Return application settings (for dependency injection / heat manager)."""
     return settings
+
+
+# Mode multipliers for risk/heat scaling (used by API and risk layer)
+MODE_MULTIPLIERS = {
+    "conservative": {"risk": 0.7, "heat": 0.8},
+    "standard": {"risk": 1.0, "heat": 1.0},
+    "aggressive": {"risk": 1.3, "heat": 1.2},
+    "maximum": {"risk": 1.5, "heat": 1.4},
+}

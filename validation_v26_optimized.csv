@@ -1,0 +1,15 @@
+Edge,Symbol,Timeframe,Trades,Winners,Losers,Win%,PF,P&L,P&L%,MaxDD%,Sharpe,T-Stat,P-Value,Significant,Verdict,Reason,Tier_A,Tier_A_PnL,Tier_B,Tier_B_PnL,Tier_C,Tier_C_PnL,Tier_D,Tier_D_PnL
+asian_range,,,0,,,,,,,,,,,,NO_DATA,,,,,,,,,
+bollinger_touch,,,0,,,,,,,,,,,,NO_DATA,,,,,,,,,
+earnings_drift,,,0,,,,,,,,,,,,NO_DATA,,,,,,,,,
+gap_fill,SPY+NVDA+TSLA+AAPL+AMD+COIN+ROKU+SHOP+SQ+MARA,1d,152,78,74,51.3,1.41,5990.99,59.9,19.9,2.49,1.62,0.0534,False,VALID,All criteria met,59,3975.63,58,805.31,35,1210.05,0,0.00
+insider_cluster,SPY+QQQ+AAPL+MSFT+NVDA+TSLA+AMD,1d,233,110,123,47.2,1.45,8689.16,86.9,26.4,2.30,2.37,0.0094,True,VALID,All criteria met,233,8689.16,0,0.00,0,0.00,0,0.00
+london_open,,,0,,,,,,,,,,,,NO_DATA,,,,,,,,,
+month_end,SPY+QQQ,1d,56,25,31,44.6,1.09,99.47,1.0,3.4,0.64,0.28,0.3900,False,INVALID,"Not statistically significant (p=0.390, need <0.15); Win rate 44.6% below 45%; Expected value 0.018% below 0.05%",0,0.00,56,99.47,0,0.00,0,0.00
+ny_open,,,0,,,,,,,,,,,,NO_DATA,,,,,,,,,
+orb,,,0,,,,,,,,,,,,NO_DATA,,,,,,,,,
+overnight_premium,SPY+QQQ+TSLA+NVDA+AMD+AAPL+GOOGL+META+NFLX+CRM,1d,3471,1863,1608,53.7,1.39,12786.73,127.9,15.2,1.28,5.14,0.0000,True,MARGINAL,Expected value 0.037% below 0.05%,0,0.00,0,0.00,3471,12786.73,0,0.00
+power_hour,,,0,,,,,,,,,,,,NO_DATA,,,,,,,,,
+rsi_extreme,SPY+QQQ,1d,80,54,26,67.5,1.82,581.37,5.8,2.5,3.36,1.91,0.0302,True,VALID,All criteria met,0,0.00,80,581.37,0,0.00,0,0.00
+turn_of_month,SPY+QQQ+IWM,1d,99,49,50,49.5,1.06,300.88,3.0,12.3,0.50,0.26,0.3992,False,INVALID,"Not statistically significant (p=0.399, need <0.15); Expected value 0.030% below 0.05%",0,0.00,99,300.88,0,0.00,0,0.00
+vwap_deviation,SPY+QQQ+IWM,1d,142,57,85,40.1,1.30,827.63,8.3,5.5,1.77,1.26,0.1041,False,VALID,All criteria met,0,0.00,142,827.63,0,0.00,0,0.00

@@ -76,6 +76,58 @@ class DynamicPositionSizer:
             self.max_risk_pct = max_risk_pct if max_risk_pct is not None else MAX_RISK_PCT
             self.heat_limit = max_heat_limit if max_heat_limit is not None else MAX_HEAT_LIMIT
 
+    # Verdict-based multipliers: MARGINAL edges trade at reduced size
+    VERDICT_MULTIPLIERS = {
+        "VALID": 1.0,
+        "MARGINAL": 0.75,
+        "INVALID": 0.0,
+        "INSUFFICIENT_DATA": 0.0,
+    }
+
+    def calculate_kelly_fraction(
+        self,
+        win_rate: float,
+        avg_win: float,
+        avg_loss: float,
+        fraction: float = 0.5,  # Half-Kelly by default
+    ) -> float:
+        """
+        Calculate Kelly Criterion fraction for position sizing.
+
+        Full Kelly is optimal but volatile. Half-Kelly (fraction=0.5)
+        achieves 75% of growth with 50% of the variance.
+
+        Args:
+            win_rate: Historical win rate (0.0 to 1.0)
+            avg_win: Average winning trade return (e.g., 0.02 for 2%)
+            avg_loss: Average losing trade return (e.g., 0.01 for 1%)
+            fraction: Kelly fraction (0.5 = Half-Kelly)
+
+        Returns:
+            Kelly-adjusted position multiplier (capped 0.5 to 2.0)
+        """
+        if win_rate <= 0 or win_rate >= 1:
+            return 1.0  # Invalid win rate, use default
+
+        if avg_loss <= 0:
+            return 1.0  # Can't calculate without loss data
+
+        # Risk/reward ratio
+        rr_ratio = avg_win / avg_loss
+
+        # Kelly formula: f* = (bp - q) / b
+        # Where b = R:R, p = win_rate, q = 1 - win_rate
+        loss_rate = 1 - win_rate
+        kelly_full = win_rate - (loss_rate / rr_ratio)
+
+        # Apply fraction (Half-Kelly = 0.5)
+        kelly_adjusted = kelly_full * fraction
+
+        # Cap between 0.5x and 2.0x (never go below half, never above double)
+        kelly_multiplier = max(0.5, min(kelly_adjusted * 4 + 1, 2.0))
+
+        return round(kelly_multiplier, 2)
+
     def calculate_size(
         self,
         starting_balance: float,
@@ -88,6 +140,8 @@ class DynamicPositionSizer:
         regime: MarketRegime,
         symbol: str,
         market: Optional[Market] = None,
+        verdict: str = "VALID",
+        kelly_data: Optional[dict] = None,
     ) -> PositionSize:
         """
         Calculate position size for a trade.
@@ -106,6 +160,9 @@ class DynamicPositionSizer:
             regime: Market regime.
             symbol: Symbol (for logging).
             market: Optional market type for rounding (stocks -> whole shares, forex -> 2 decimals).
+            verdict: Edge verdict ("VALID", "MARGINAL", etc.). MARGINAL trades at 75% size.
+            kelly_data: Optional dict with keys 'win_rate', 'avg_win', 'avg_loss' for
+                       Kelly Criterion sizing. If None, kelly_multiplier defaults to 1.0.
 
         Returns:
             PositionSize with risk_pct, position_size, can_trade, etc.
@@ -153,8 +210,37 @@ class DynamicPositionSizer:
         else:
             momentum_mult = 1.0
 
+        # Verdict multiplier: MARGINAL edges trade at 75% size
+        verdict_mult = self.VERDICT_MULTIPLIERS.get(verdict, 0.0)
+        if verdict_mult <= 0.0:
+            logger.warning(
+                "[%s] Rejected: verdict=%s (not tradeable)", symbol, verdict,
+            )
+            return self._reject(
+                symbol=symbol,
+                stop_distance=stop_distance,
+                stop_distance_pct=stop_distance_pct,
+                current_heat=current_heat,
+                reason=f"Verdict {verdict} is not tradeable",
+            )
+
+        # Kelly multiplier (applied after score but before heat cap)
+        if kelly_data is not None:
+            kelly_mult = self.calculate_kelly_fraction(
+                win_rate=kelly_data.get("win_rate", 0),
+                avg_win=kelly_data.get("avg_win", 0),
+                avg_loss=kelly_data.get("avg_loss", 0),
+                fraction=kelly_data.get("fraction", 0.5),
+            )
+        else:
+            kelly_mult = 1.0
+
         # Raw risk % before caps
-        risk_pct = self.base_risk_pct * score_mult * regime_mult * momentum_mult
+        risk_pct = self.base_risk_pct * score_mult * regime_mult * momentum_mult * verdict_mult
+
+        # Apply Kelly after score multipliers
+        kelly_adjusted_risk = risk_pct * kelly_mult
+        risk_pct = kelly_adjusted_risk
 
         # Cap by usable heat
         if risk_pct > usable_heat:
@@ -204,9 +290,9 @@ class DynamicPositionSizer:
 
         logger.debug(
             "[%s] size=%.4f value=%.2f risk_pct=%.2f risk_amount=%.2f "
-            "score_mult=%.2f regime_mult=%.2f momentum_mult=%.2f heat_after=%.2f",
+            "score_mult=%.2f regime_mult=%.2f momentum_mult=%.2f kelly_mult=%.2f heat_after=%.2f",
             symbol, position_size, position_value, risk_pct, risk_amount,
-            score_mult, regime_mult, momentum_mult, heat_after_trade,
+            score_mult, regime_mult, momentum_mult, kelly_mult, heat_after_trade,
         )
 
         return PositionSize(
@@ -219,6 +305,8 @@ class DynamicPositionSizer:
             score_multiplier=score_mult,
             regime_multiplier=regime_mult,
             momentum_multiplier=momentum_mult,
+            kelly_multiplier=kelly_mult,
+            kelly_adjusted_risk=kelly_adjusted_risk,
             heat_after_trade=heat_after_trade,
             can_trade=True,
             rejection_reason=None,

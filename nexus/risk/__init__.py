@@ -22,9 +22,11 @@ from .correlation import (
     CorrelationMonitor,
     PositionCorrelationInfo,
 )
+from .hardware_stops import HardwareStop, HardwareStopManager
 from .heat_manager import DynamicHeatManager
 from .kill_switch import KillSwitch
 from .position_sizer import DynamicPositionSizer
+from .slippage_tracker import SlippageRecord, SlippageTracker
 from .state_persistence import RiskStatePersistence, get_risk_persistence
 
 __all__ = [
@@ -34,6 +36,8 @@ __all__ = [
     "CorrelationMonitor",
     "DynamicHeatManager",
     "DynamicPositionSizer",
+    "HardwareStop",
+    "HardwareStopManager",
     "HeatCheckResult",
     "HeatSummary",
     "HIGH_CORRELATION_PAIRS",
@@ -45,6 +49,8 @@ __all__ = [
     "PositionCorrelationInfo",
     "PositionSize",
     "SECTOR_MAPPING",
+    "SlippageRecord",
+    "SlippageTracker",
     "SmartCircuitBreaker",
     "SystemHealth",
     "TrackedPosition",

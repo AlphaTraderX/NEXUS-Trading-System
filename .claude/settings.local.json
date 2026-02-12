@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(cd:*)",
+      "Bash(dir \"C:\\\\NEXUS-Project\\\\nexus\\\\backtest\")",
+      "Bash(dir \"C:\\\\NEXUS-Project\\\\nexus\\\\scripts\")",
+      "Bash(dir:*)"
+    ]
+  }
+}
