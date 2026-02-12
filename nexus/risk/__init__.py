@@ -16,6 +16,13 @@ from nexus.core.models import (
 )
 
 from .circuit_breaker import SmartCircuitBreaker
+from .edge_decay import (
+    EdgeBaseline,
+    EdgeDecayMonitor,
+    EdgeHealth,
+    TradeOutcome,
+    get_decay_monitor,
+)
 from .correlation import (
     HIGH_CORRELATION_PAIRS,
     SECTOR_MAPPING,
@@ -36,6 +43,9 @@ __all__ = [
     "CorrelationMonitor",
     "DynamicHeatManager",
     "DynamicPositionSizer",
+    "EdgeBaseline",
+    "EdgeDecayMonitor",
+    "EdgeHealth",
     "HardwareStop",
     "HardwareStopManager",
     "HeatCheckResult",
@@ -54,6 +64,8 @@ __all__ = [
     "SmartCircuitBreaker",
     "SystemHealth",
     "TrackedPosition",
+    "TradeOutcome",
     "RiskStatePersistence",
+    "get_decay_monitor",
     "get_risk_persistence",
 ]
