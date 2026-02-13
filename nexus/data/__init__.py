@@ -32,6 +32,22 @@ from .stocktwits import (
     SentimentSpike,
 )
 from .ig import IGProvider
+from .crypto import BinanceProvider, KrakenProvider
+from .orchestrator import (
+    DataOrchestrator,
+    get_orchestrator,
+    reset_orchestrator,
+    TradingSession as OrchestratorSession,
+)
+from .instruments import (
+    InstrumentRegistry,
+    Instrument,
+    InstrumentType,
+    Region,
+    DataProvider,
+    TradingSession,
+    get_instrument_registry,
+)
 
 __all__ = [
     "BaseDataProvider",
@@ -60,4 +76,17 @@ __all__ = [
     "SentimentData",
     "SentimentSpike",
     "IGProvider",
+    "InstrumentRegistry",
+    "Instrument",
+    "InstrumentType",
+    "Region",
+    "DataProvider",
+    "TradingSession",
+    "get_instrument_registry",
+    "BinanceProvider",
+    "KrakenProvider",
+    "DataOrchestrator",
+    "get_orchestrator",
+    "reset_orchestrator",
+    "OrchestratorSession",
 ]
