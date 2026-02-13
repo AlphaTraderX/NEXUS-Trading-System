@@ -5,6 +5,7 @@ Abstract base class for all edge scanners. Each scanner detects one specific
 type of trading edge and returns Opportunity objects for scoring and execution.
 """
 
+import logging
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime, time, timezone
@@ -12,9 +13,11 @@ from typing import Any, Callable, Dict, List, Optional
 
 import pandas as pd
 
-from nexus.core.enums import Direction, EdgeType, Market
+from nexus.core.enums import Direction, EdgeType, Market, Timeframe, TIMEFRAME_THRESHOLDS
 from nexus.core.models import Opportunity
 from nexus.intelligence.regime import MarketRegime
+
+logger = logging.getLogger(__name__)
 
 
 class BaseScanner(ABC):
@@ -26,6 +29,9 @@ class BaseScanner(ABC):
     helpers for ATR/RSI, entry/stop/target calculation, opportunity creation,
     and symbol-to-market inference.
     """
+
+    # Override in subclass to enable multi-timeframe scanning
+    supported_timeframes: List[Timeframe] = [Timeframe.D1]
 
     def __init__(
         self,
@@ -49,6 +55,49 @@ class BaseScanner(ABC):
         self.markets: List[Market] = []
         self.instruments: List[str] = []
         self.name: str = self.__class__.__name__
+
+    def get_thresholds(self, timeframe: Timeframe) -> dict:
+        """Get timeframe-specific thresholds for scanning."""
+        return TIMEFRAME_THRESHOLDS.get(timeframe, TIMEFRAME_THRESHOLDS[Timeframe.D1])
+
+    async def scan_timeframe(
+        self,
+        timeframe: Timeframe,
+        instruments: Optional[List[str]] = None,
+    ) -> List[Opportunity]:
+        """
+        Scan a specific timeframe.
+
+        Override in subclass for timeframe-specific logic.
+        Default implementation calls scan() for backward compatibility.
+        """
+        return await self.scan()
+
+    async def scan_all_timeframes(
+        self,
+        instruments: Optional[List[str]] = None,
+    ) -> List[Opportunity]:
+        """
+        Scan all supported timeframes.
+
+        Returns opportunities from all timeframes with timeframe tagged.
+        """
+        all_opportunities = []
+
+        for tf in self.supported_timeframes:
+            try:
+                opps = await self.scan_timeframe(tf, instruments)
+
+                for opp in opps:
+                    opp.edge_data["timeframe"] = tf.value
+                    opp.edge_data["timeframe_minutes"] = tf.minutes
+
+                all_opportunities.extend(opps)
+
+            except Exception as e:
+                logger.error(f"Error scanning {self.__class__.__name__} on {tf.value}: {e}")
+
+        return all_opportunities
 
     async def get_current_price(self, symbol: str) -> float:
         """

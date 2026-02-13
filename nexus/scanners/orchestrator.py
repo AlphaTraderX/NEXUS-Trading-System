@@ -21,7 +21,7 @@ from .insider import InsiderScanner
 from .earnings import EarningsDriftScanner
 from .overnight import OvernightPremiumScanner
 from .sentiment import SentimentScanner
-from nexus.core.enums import Direction, EdgeType
+from nexus.core.enums import Direction, EdgeType, Timeframe
 from nexus.core.models import Opportunity
 from nexus.data.base import BaseDataProvider
 from nexus.execution.cooldown_manager import get_cooldown_manager
@@ -63,6 +63,7 @@ class ScannerOrchestrator:
         data_provider: Optional[BaseDataProvider] = None,
         stock_provider: Optional[BaseDataProvider] = None,
         forex_provider: Optional[BaseDataProvider] = None,
+        crypto_provider: Optional[BaseDataProvider] = None,
         insider_provider: Optional[Any] = None,  # For insider scanner
         config: Optional[Dict] = None,
         edge_decay_monitor: Any = None,
@@ -78,6 +79,7 @@ class ScannerOrchestrator:
             self.data_provider = data_provider
         else:
             raise ValueError("Provide either data_provider or (stock_provider and forex_provider)")
+        self.crypto_provider = crypto_provider
         self.insider_provider = insider_provider
         self.config = config or {}
         self.edge_decay_monitor = edge_decay_monitor
@@ -154,6 +156,74 @@ class ScannerOrchestrator:
 
         return True
 
+    def is_weekend(self) -> bool:
+        """Check if it's currently weekend (Sat/Sun)."""
+        now = datetime.now(timezone.utc)
+        return now.weekday() >= 5  # 5 = Saturday, 6 = Sunday
+
+    def is_crypto_only_mode(self) -> bool:
+        """
+        Check if we should only scan crypto.
+
+        Returns True if it's weekend (all traditional markets closed).
+        """
+        return self.is_weekend()
+
+    def get_crypto_instruments(self) -> List[str]:
+        """Get crypto instruments from registry."""
+        from nexus.data.instruments import get_instrument_registry, InstrumentType
+
+        registry = get_instrument_registry()
+        crypto = registry.get_by_type(InstrumentType.CRYPTO)
+        return [c.symbol for c in crypto]
+
+    async def scan_crypto_only(self) -> List[Opportunity]:
+        """
+        Scan only crypto markets (for weekends).
+
+        Uses VWAP and RSI HF scanners on crypto instruments.
+        """
+        logger.info("Weekend mode: Scanning crypto only")
+
+        if not self.crypto_provider:
+            logger.warning("No crypto provider available for weekend trading")
+            return []
+
+        crypto_instruments = self.get_crypto_instruments()
+        opportunities = []
+
+        from .vwap_hf import VWAPHighFrequencyScanner
+        from .rsi_hf import RSIHighFrequencyScanner
+
+        scan_timeframes = [Timeframe.M15, Timeframe.H1, Timeframe.H4]
+
+        # VWAP HF scan
+        vwap_scanner = VWAPHighFrequencyScanner(self.crypto_provider, self.settings if hasattr(self, 'settings') else None)
+        for tf in scan_timeframes:
+            try:
+                opps = await vwap_scanner.scan_timeframe(tf, crypto_instruments)
+                for opp in opps:
+                    opp.edge_data["timeframe"] = tf.value
+                    opp.edge_data["weekend_mode"] = True
+                opportunities.extend(opps)
+            except Exception as e:
+                logger.error(f"VWAP crypto scan error ({tf.value}): {e}")
+
+        # RSI HF scan
+        rsi_scanner = RSIHighFrequencyScanner(self.crypto_provider, self.settings if hasattr(self, 'settings') else None)
+        for tf in scan_timeframes:
+            try:
+                opps = await rsi_scanner.scan_timeframe(tf, crypto_instruments)
+                for opp in opps:
+                    opp.edge_data["timeframe"] = tf.value
+                    opp.edge_data["weekend_mode"] = True
+                opportunities.extend(opps)
+            except Exception as e:
+                logger.error(f"RSI crypto scan error ({tf.value}): {e}")
+
+        logger.info(f"Weekend crypto scan found {len(opportunities)} opportunities")
+        return opportunities
+
     async def run_all_scanners(self) -> List[Opportunity]:
         """
         Run all active scanners and aggregate results.
@@ -210,9 +280,13 @@ class ScannerOrchestrator:
 
     async def run_scan_cycle(self) -> List[Opportunity]:
         """
-        Run one complete scan cycle (alias for run_all_scanners).
+        Run one complete scan cycle.
+
+        On weekends, only scans crypto markets.
         Used by NexusScheduler.
         """
+        if self.is_crypto_only_mode() and self.crypto_provider:
+            return await self.scan_crypto_only()
         return await self.run_all_scanners()
 
     async def run_scanner(self, scanner_name: str) -> List[Opportunity]:

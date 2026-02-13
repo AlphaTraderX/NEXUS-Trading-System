@@ -75,3 +75,15 @@ temp/
 
 # Risk state persistence (contains safety status)
 nexus_risk_state.json
+
+# NEXUS security files - NEVER commit these
+.nexus_license
+.nexus_secrets.enc
+.nexus_secrets_audit.log
+audit_logs/
+
+# API keys and credentials
+*.pem
+*.key
+*.crt
+*.p12

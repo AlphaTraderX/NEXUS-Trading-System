@@ -34,6 +34,13 @@ from .heat_manager import DynamicHeatManager
 from .kill_switch import KillSwitch
 from .position_sizer import DynamicPositionSizer
 from .slippage_tracker import SlippageRecord, SlippageTracker
+from .portfolio_heat import (
+    HeatLevel,
+    HeatPosition,
+    PortfolioHeatCheck,
+    PortfolioHeatManager,
+)
+from .signal_cooldown import CooldownEntry, SignalCooldownManager
 from .state_persistence import RiskStatePersistence, get_risk_persistence
 
 __all__ = [
@@ -68,4 +75,10 @@ __all__ = [
     "RiskStatePersistence",
     "get_decay_monitor",
     "get_risk_persistence",
+    "CooldownEntry",
+    "HeatLevel",
+    "HeatPosition",
+    "PortfolioHeatCheck",
+    "PortfolioHeatManager",
+    "SignalCooldownManager",
 ]

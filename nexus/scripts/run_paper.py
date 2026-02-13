@@ -1,9 +1,12 @@
 """
-NEXUS Paper Trading Runner - full end-to-end simulation.
+NEXUS Paper Trading Runner - GOD MODE (11 profitable scanners).
 
-Runs the 4 validated scanners, generates signals, executes on paper,
-tracks P&L, and sends alerts. Use this to validate live logic before
-going live with real money.
+Runs all 11 backtest-validated scanners, generates signals, executes on
+paper, tracks P&L, and sends alerts. Use this to validate live logic
+before going live with real money.
+
+Backtest results (2020-2024): £136M total P&L across 11 edges.
+Excluded: Month End (-£285K), NY Open (-£316K).
 
 Usage:
     python -m nexus.scripts.run_paper                       # Run once
@@ -36,11 +39,19 @@ from nexus.risk.circuit_breaker import SmartCircuitBreaker
 from nexus.risk.heat_manager import DynamicHeatManager
 from nexus.risk.kill_switch import KillSwitch
 
-# Scanners (the 4 fixed, validated ones)
+# GOD MODE: All 11 profitable scanners from backtest validation
 from nexus.scanners.gap import GapScanner
 from nexus.scanners.overnight import OvernightPremiumScanner
 from nexus.scanners.vwap import VWAPScanner
 from nexus.scanners.rsi import RSIScanner
+from nexus.scanners.session import PowerHourScanner, LondonOpenScanner, AsianRangeScanner
+from nexus.scanners.turn_of_month import TurnOfMonthScanner
+from nexus.scanners.orb import ORBScanner
+from nexus.scanners.insider import InsiderScanner
+from nexus.scanners.bollinger import BollingerScanner
+# EXCLUDED (losing edges from backtest):
+# - CalendarScanner (month_end: -£285K)
+# - NYOpenScanner (ny_open: -£316K)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -225,15 +236,26 @@ class PaperTradingRunner:
         if self.data_provider is None:
             logger.info("Using placeholder data (offline mode)")
 
-        # Scanners
+        # GOD MODE: All 11 profitable scanners
+        # Backtest results: £136M total P&L over 5 years
         dp = self.data_provider
         self.scanners = [
-            GapScanner(data_provider=dp),
-            OvernightPremiumScanner(data_provider=dp),
-            VWAPScanner(data_provider=dp),
-            RSIScanner(data_provider=dp),
+            # Tier 1: £30M+ each
+            VWAPScanner(data_provider=dp),              # £36.4M, 66.9% WR
+            GapScanner(data_provider=dp),               # £33.0M, 71.5% WR
+            # Tier 2: £10M+ each
+            OvernightPremiumScanner(data_provider=dp),   # £16.2M, 62.5% WR
+            PowerHourScanner(data_provider=dp),          # £15.2M, 61.8% WR
+            RSIScanner(data_provider=dp),                # £11.9M, 59.0% WR
+            # Tier 3: £2M+ each
+            TurnOfMonthScanner(data_provider=dp),        # £6.4M, 64.7% WR
+            ORBScanner(data_provider=dp),                # £5.7M, 58.2% WR
+            LondonOpenScanner(data_provider=dp),         # £4.5M, 53.6% WR
+            InsiderScanner(data_provider=dp),             # £2.7M, 60.9% WR
+            AsianRangeScanner(data_provider=dp),          # £2.6M, 67.6% WR
+            BollingerScanner(data_provider=dp),           # £2.0M, 50.0% WR
         ]
-        logger.info("Initialized %d validated scanners", len(self.scanners))
+        logger.info("GOD MODE: Initialized %d scanners", len(self.scanners))
 
         # Exit manager (uses same data provider as scanners)
         self.exit_manager = ExitManager(data_provider=dp)
