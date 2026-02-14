@@ -47,7 +47,8 @@ class IGProvider(ReconnectionMixin, BaseBroker):
     LIVE_URL = "https://api.ig.com/gateway/deal"
     DEMO_URL = "https://demo-api.ig.com/gateway/deal"
     
-    # Epic mappings (NEXUS symbol -> IG epic)
+    # Epic mappings (NEXUS symbol -> IG epic for SPREAD BETTING)
+    # Note: Spread betting uses .DAILY.IP epics, not .IFD.IP (CFD)
     EPIC_MAP = {
         # Forex
         "EUR/USD": "CS.D.EURUSD.CFD.IP",
@@ -56,11 +57,11 @@ class IGProvider(ReconnectionMixin, BaseBroker):
         "AUD/USD": "CS.D.AUDUSD.CFD.IP",
         "USD/CAD": "CS.D.USDCAD.CFD.IP",
         "EUR/GBP": "CS.D.EURGBP.CFD.IP",
-        # Indices
-        "US500": "IX.D.SPTRD.IFD.IP",  # S&P 500
-        "US100": "IX.D.NASDAQ.IFD.IP",  # Nasdaq 100
-        "UK100": "IX.D.FTSE.IFD.IP",    # FTSE 100
-        "DE40": "IX.D.DAX.IFD.IP",       # DAX
+        # Indices (spread betting = .DAILY.IP)
+        "US500": "IX.D.SPTRD.DAILY.IP",   # S&P 500
+        "US100": "IX.D.NASDAQ.DAILY.IP",   # Nasdaq 100
+        "UK100": "IX.D.FTSE.DAILY.IP",     # FTSE 100
+        "DE40": "IX.D.DAX.DAILY.IP",       # DAX
         # Commodities
         "GOLD": "CS.D.USCGC.TODAY.IP",
         "OIL": "CC.D.CL.UNC.IP",
@@ -73,12 +74,13 @@ class IGProvider(ReconnectionMixin, BaseBroker):
         self._username = settings.ig_username
         self._password = settings.ig_password
         self._demo = settings.ig_demo
-        
+        self._desired_account_id = settings.ig_account_id  # e.g. Z68G03
+
         self._base_url = self.DEMO_URL if self._demo else self.LIVE_URL
         self._cst: Optional[str] = None  # Client session token
         self._security_token: Optional[str] = None
         self._lightstreamer_endpoint: Optional[str] = None
-        
+
         self._client = httpx.AsyncClient(timeout=30.0)
         self._subscriptions: Dict[str, Any] = {}
     
@@ -87,7 +89,13 @@ class IGProvider(ReconnectionMixin, BaseBroker):
     # =========================================================================
     
     async def connect(self) -> bool:
-        """Connect and authenticate with IG."""
+        """Connect and authenticate with IG.
+
+        If ``ig_account_id`` is set in settings and differs from the
+        default account returned by the session endpoint, automatically
+        switches to the desired account (e.g. spread-betting Z68G03)
+        and refreshes the session tokens.
+        """
         try:
             # Authentication request
             response = await self._client.post(
@@ -103,26 +111,66 @@ class IGProvider(ReconnectionMixin, BaseBroker):
                     "password": self._password,
                 },
             )
-            
+
             if response.status_code != 200:
                 logger.error(f"IG auth failed: {response.status_code} - {response.text}")
                 return False
-            
+
             # Extract tokens from headers
             self._cst = response.headers.get("CST")
             self._security_token = response.headers.get("X-SECURITY-TOKEN")
-            
+
             # Get account info from response
             data = response.json()
             self._account_id = data.get("currentAccountId")
             self._lightstreamer_endpoint = data.get("lightstreamerEndpoint")
-            
+
+            # Switch to desired account if it differs (e.g. CFD -> spread betting)
+            if (
+                self._desired_account_id
+                and self._account_id != self._desired_account_id
+            ):
+                switch_ok = await self._switch_account(self._desired_account_id)
+                if not switch_ok:
+                    logger.warning(
+                        f"Could not switch to {self._desired_account_id}, "
+                        f"staying on {self._account_id}"
+                    )
+
             self._connected = True
             logger.info(f"Connected to IG Markets (account: {self._account_id}, demo: {self._demo})")
             return True
-            
+
         except Exception as e:
             logger.error(f"IG connection failed: {e}")
+            return False
+
+    async def _switch_account(self, account_id: str) -> bool:
+        """Switch to a different IG account and refresh session tokens."""
+        try:
+            response = await self._client.put(
+                f"{self._base_url}/session",
+                headers={**self._auth_headers(), "Version": "1"},
+                json={"accountId": account_id},
+            )
+            if response.status_code != 200:
+                logger.error(f"IG account switch failed: {response.status_code} - {response.text}")
+                return False
+
+            # Refresh tokens from the switch response
+            new_cst = response.headers.get("CST")
+            new_security = response.headers.get("X-SECURITY-TOKEN")
+            if new_cst:
+                self._cst = new_cst
+            if new_security:
+                self._security_token = new_security
+
+            self._account_id = account_id
+            logger.info(f"Switched to IG account: {account_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"IG account switch error: {e}")
             return False
     
     async def disconnect(self) -> None:
@@ -532,8 +580,25 @@ class IGProvider(ReconnectionMixin, BaseBroker):
     # =========================================================================
     
     def convert_symbol(self, nexus_symbol: str) -> str:
-        """Convert NEXUS symbol to IG epic."""
-        return self.EPIC_MAP.get(nexus_symbol, nexus_symbol)
+        """Convert NEXUS symbol to IG epic.
+
+        Checks the hardcoded EPIC_MAP first, then falls back to the
+        instrument registry's ``provider_symbol`` field.
+        """
+        if nexus_symbol in self.EPIC_MAP:
+            return self.EPIC_MAP[nexus_symbol]
+
+        # Check registry for provider_symbol (e.g. AZN.L -> its IG epic)
+        try:
+            from nexus.data.instruments import get_instrument_registry
+            registry = get_instrument_registry()
+            inst = registry.get(nexus_symbol)
+            if inst and inst.provider_symbol and inst.provider_symbol != nexus_symbol:
+                return inst.provider_symbol
+        except Exception:
+            pass
+
+        return nexus_symbol
     
     def convert_symbol_from_broker(self, epic: str) -> str:
         """Convert IG epic to NEXUS symbol."""

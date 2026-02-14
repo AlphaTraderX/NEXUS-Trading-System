@@ -97,6 +97,8 @@ def _parse_args() -> argparse.Namespace:
                         help="Compare results to a saved JSON baseline")
     parser.add_argument("--experimental", action="store_true", default=False,
                         help="Run with experimental optimizations (flag for tracking)")
+    parser.add_argument("--registry", action="store_true", default=False,
+                        help="Use InstrumentRegistry + cache instead of hardcoded symbol lists")
     return parser.parse_args()
 
 
@@ -111,6 +113,7 @@ async def _run_all_backtests(args) -> Dict[str, Optional[object]]:
         starting_balance=args.balance,
         risk_per_trade=args.risk,
         use_score_sizing=not args.no_score_sizing,
+        use_registry=args.registry,
     )
 
     edges = list(engine.SCANNER_MAP.keys())
@@ -449,7 +452,8 @@ async def run() -> None:
     print(f"  Period:  {args.start} to {args.end}")
     sizing_mode = "Fixed (flat)" if args.no_score_sizing else "Score-based + compounding"
     mode_tag = " [EXPERIMENTAL]" if args.experimental else ""
-    print(f"  Balance: ${args.balance:,.0f}  |  Risk: {args.risk}%  |  Sizing: {sizing_mode}{mode_tag}\n")
+    registry_tag = " [REGISTRY]" if args.registry else ""
+    print(f"  Balance: ${args.balance:,.0f}  |  Risk: {args.risk}%  |  Sizing: {sizing_mode}{mode_tag}{registry_tag}\n")
 
     results = await _run_all_backtests(args)
 

@@ -28,8 +28,13 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
     llm_model: str = "llama-3.1-70b-versatile"
 
-    # Optional: IG, IBKR, etc.
+    # Binance API (crypto data — public works without keys, keys raise rate limits)
+    binance_api_key: str = ""
+    binance_api_secret: str = ""
+
+    # IG Markets (spread betting — 0% tax UK)
     ig_api_key: str = ""
+    ig_account_id: str = ""
     ig_username: str = ""
     ig_password: str = ""
     ig_demo: bool = True

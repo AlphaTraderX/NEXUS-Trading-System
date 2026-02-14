@@ -31,6 +31,10 @@ from nexus.backtest.trade_simulator import (
     ExitReason, SimulatedTrade, TradeSimulator, score_to_tier, tier_multiplier,
 )
 from nexus.backtest.statistics import BacktestStatistics, StatisticsCalculator
+from nexus.data.instruments import (
+    DataProvider, InstrumentType, get_instrument_registry,
+)
+from nexus.data.cache import get_cache_manager
 
 # Scanner classes – imported for the SCANNER_MAP reference only;
 # actual backtesting uses inline signal logic in _check_bar_for_signal.
@@ -161,6 +165,28 @@ class BacktestEngine:
         EdgeType.OVERNIGHT_PREMIUM: ["SPY", "QQQ", "TSLA", "NVDA", "AMD", "AAPL", "GOOGL", "META", "NFLX", "CRM"],
         # v26 expansion tested: SMCI(PF 1.35), PLTR(PF 1.34), XLK(PF 1.30) pass individually
         # but combined MaxDD 22-23% exceeds 16% limit (correlated tech drawdowns with compounding)
+    }
+
+    # Registry filters: map each edge to (provider, instrument_type, max_instruments)
+    # Used when use_registry=True to query InstrumentRegistry instead of EDGE_INSTRUMENTS.
+    # Only Polygon (US stocks) and OANDA (forex) have BacktestDataLoader support.
+    EDGE_REGISTRY_FILTERS = {
+        # Stock edges — Polygon US
+        EdgeType.GAP_FILL: (DataProvider.POLYGON, InstrumentType.STOCK, 30),
+        EdgeType.OVERNIGHT_PREMIUM: (DataProvider.POLYGON, InstrumentType.STOCK, 30),
+        EdgeType.INSIDER_CLUSTER: (DataProvider.POLYGON, InstrumentType.STOCK, 20),
+        EdgeType.VWAP_DEVIATION: (DataProvider.POLYGON, InstrumentType.STOCK, 20),
+        EdgeType.RSI_EXTREME: (DataProvider.POLYGON, InstrumentType.STOCK, 10),
+        EdgeType.TURN_OF_MONTH: (DataProvider.POLYGON, InstrumentType.STOCK, 10),
+        EdgeType.MONTH_END: (DataProvider.POLYGON, InstrumentType.STOCK, 10),
+        EdgeType.POWER_HOUR: (DataProvider.POLYGON, InstrumentType.STOCK, 20),
+        EdgeType.ORB: (DataProvider.POLYGON, InstrumentType.STOCK, 10),
+        EdgeType.BOLLINGER_TOUCH: (DataProvider.POLYGON, InstrumentType.STOCK, 10),
+        EdgeType.EARNINGS_DRIFT: (DataProvider.POLYGON, InstrumentType.STOCK, 10),
+        # Forex edges — OANDA
+        EdgeType.LONDON_OPEN: (DataProvider.OANDA, InstrumentType.FOREX, 10),
+        EdgeType.NY_OPEN: (DataProvider.OANDA, InstrumentType.FOREX, 10),
+        EdgeType.ASIAN_RANGE: (DataProvider.OANDA, InstrumentType.FOREX, 10),
     }
 
     # Edge-specific risk profiles — replace single 15% MaxDD with per-edge thresholds
@@ -348,10 +374,12 @@ class BacktestEngine:
         starting_balance: float = 10_000.0,
         risk_per_trade: float = 1.0,
         use_score_sizing: bool = False,
+        use_registry: bool = False,
     ):
         self.starting_balance = starting_balance
         self.risk_per_trade = risk_per_trade
         self.use_score_sizing = use_score_sizing
+        self.use_registry = use_registry
 
         self.data_loader = BacktestDataLoader()
         self.simulator = TradeSimulator(
@@ -359,6 +387,14 @@ class BacktestEngine:
             risk_per_trade_pct=risk_per_trade,
         )
         self.stats_calc = StatisticsCalculator()
+
+        # Registry + cache for dynamic instrument discovery
+        if use_registry:
+            self._registry = get_instrument_registry()
+            self._cache_mgr = get_cache_manager()
+        else:
+            self._registry = None
+            self._cache_mgr = None
 
         # Current timeframe — updated per backtest for stop/target sizing
         self._current_timeframe: str = "1d"
@@ -390,6 +426,66 @@ class BacktestEngine:
     def _get_risk_profile(self, edge_type: EdgeType) -> dict:
         """Get edge-specific risk profile, falling back to defaults."""
         return self.EDGE_RISK_PROFILES.get(edge_type, self.DEFAULT_RISK_PROFILE)
+
+    # ------------------------------------------------------------------
+    # Instrument discovery
+    # ------------------------------------------------------------------
+
+    def get_instruments_for_edge(
+        self,
+        edge_type: EdgeType,
+        timeframe: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> List[str]:
+        """Get instrument list for an edge.
+
+        When ``use_registry=True``, queries the InstrumentRegistry filtered
+        by provider/type, then narrows to instruments with cached data.
+        Hardcoded (validated) symbols are always placed first in the list.
+
+        When ``use_registry=False`` (default), returns EDGE_INSTRUMENTS.
+        """
+        hardcoded = self.EDGE_INSTRUMENTS.get(edge_type, ["SPY"])
+
+        if not self.use_registry or self._registry is None:
+            return hardcoded
+
+        filt = self.EDGE_REGISTRY_FILTERS.get(edge_type)
+        if filt is None:
+            return hardcoded
+
+        provider, inst_type, max_inst = filt
+
+        # Query registry for all matching instruments
+        candidates = [
+            inst.symbol
+            for inst in self._registry.get_by_provider(provider)
+            if inst.instrument_type == inst_type
+        ]
+
+        # Narrow to instruments with cached data when dates are known
+        if self._cache_mgr and timeframe and start_date and end_date:
+            cached = [
+                s for s in candidates
+                if self._cache_mgr.has_data(s, timeframe, start_date, end_date)
+            ]
+            if cached:
+                candidates = cached
+            else:
+                logger.warning(
+                    "No cached registry data for %s — falling back to defaults",
+                    edge_type.value,
+                )
+                return hardcoded
+
+        # Validated symbols first, then registry additions
+        ordered = list(hardcoded)
+        for s in candidates:
+            if s not in ordered:
+                ordered.append(s)
+
+        return ordered[:max_inst]
 
     # ------------------------------------------------------------------
     # Score-based sizing helpers
@@ -440,15 +536,21 @@ class BacktestEngine:
         # Reset balance for independent per-edge testing
         self._reset_balance()
 
+        timeframe = timeframe or self.EDGE_TIMEFRAMES.get(edge_type, "1d")
+
+        # Resolve instrument list (registry-aware when use_registry=True)
+        edge_instruments = self.get_instruments_for_edge(
+            edge_type, timeframe, start_date, end_date,
+        )
+
         # Multi-symbol path: when no explicit symbol and edge supports it
         use_multi = (
             symbol is None
             and edge_type in self.MULTI_SYMBOL_EDGES
-            and len(self.EDGE_INSTRUMENTS.get(edge_type, [])) > 1
+            and len(edge_instruments) > 1
         )
 
-        symbol = symbol or self.EDGE_INSTRUMENTS.get(edge_type, ["SPY"])[0]
-        timeframe = timeframe or self.EDGE_TIMEFRAMES.get(edge_type, "1d")
+        symbol = symbol or edge_instruments[0]
 
         # Skip disabled edges with empty result
         if edge_type in self.DISABLED_EDGES:
@@ -625,7 +727,7 @@ class BacktestEngine:
         When multiple symbols signal on the same day, pick the best one
         (lowest RSI for mean reversion = most extreme = highest probability).
         """
-        symbols = self.EDGE_INSTRUMENTS.get(edge_type, ["SPY"])
+        symbols = self.get_instruments_for_edge(edge_type, timeframe, start_date, end_date)
         self._current_timeframe = timeframe
         self.simulator.max_hold_bars = self.EDGE_MAX_HOLD_BARS.get(edge_type, 20)
 

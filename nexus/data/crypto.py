@@ -53,9 +53,20 @@ class BinanceProvider(BaseDataProvider):
     }
 
     def __init__(self):
-        """Initialize Binance provider."""
+        """Initialize Binance provider.
+
+        Reads API key from settings if available. Authenticated requests
+        get higher rate limits (1200/min vs default).
+        """
         super().__init__()
-        self.client = httpx.AsyncClient(timeout=30.0)
+        from nexus.config.settings import get_settings
+        settings = get_settings()
+        self.api_key = settings.binance_api_key
+        self.api_secret = settings.binance_api_secret
+        headers = {}
+        if self.api_key:
+            headers["X-MBX-APIKEY"] = self.api_key
+        self.client = httpx.AsyncClient(timeout=30.0, headers=headers)
         self._last_ping: Optional[datetime] = None
 
     async def connect(self) -> bool:

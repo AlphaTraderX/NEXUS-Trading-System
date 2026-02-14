@@ -31,10 +31,10 @@ class TestSymbolConversion:
 
     def test_convert_index_symbol(self):
         provider = IGProvider()
-        assert provider.convert_symbol("US500") == "IX.D.SPTRD.IFD.IP"
-        assert provider.convert_symbol("US100") == "IX.D.NASDAQ.IFD.IP"
-        assert provider.convert_symbol("UK100") == "IX.D.FTSE.IFD.IP"
-        assert provider.convert_symbol("DE40") == "IX.D.DAX.IFD.IP"
+        assert provider.convert_symbol("US500") == "IX.D.SPTRD.DAILY.IP"
+        assert provider.convert_symbol("US100") == "IX.D.NASDAQ.DAILY.IP"
+        assert provider.convert_symbol("UK100") == "IX.D.FTSE.DAILY.IP"
+        assert provider.convert_symbol("DE40") == "IX.D.DAX.DAILY.IP"
 
     def test_convert_commodity_symbol(self):
         provider = IGProvider()
@@ -52,8 +52,8 @@ class TestSymbolConversion:
 
     def test_convert_from_broker_index(self):
         provider = IGProvider()
-        assert provider.convert_symbol_from_broker("IX.D.SPTRD.IFD.IP") == "US500"
-        assert provider.convert_symbol_from_broker("IX.D.FTSE.IFD.IP") == "UK100"
+        assert provider.convert_symbol_from_broker("IX.D.SPTRD.DAILY.IP") == "US500"
+        assert provider.convert_symbol_from_broker("IX.D.FTSE.DAILY.IP") == "UK100"
 
     def test_convert_from_broker_unknown(self):
         provider = IGProvider()
@@ -407,7 +407,7 @@ class TestPositions:
                         "margin": 500.0,
                     },
                     "market": {
-                        "epic": "IX.D.SPTRD.IFD.IP",
+                        "epic": "IX.D.SPTRD.DAILY.IP",
                         "bid": 105.0,
                         "offer": 105.5,
                     },
@@ -760,7 +760,7 @@ class TestClosePosition:
                         "dealId": "DEAL_CLOSE",
                     },
                     "market": {
-                        "epic": "IX.D.SPTRD.IFD.IP",
+                        "epic": "IX.D.SPTRD.DAILY.IP",
                     },
                 }
             ]

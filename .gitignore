@@ -87,3 +87,6 @@ audit_logs/
 *.key
 *.crt
 *.p12
+
+# Data cache (large CSV files from warm_cache)
+data/cache/
