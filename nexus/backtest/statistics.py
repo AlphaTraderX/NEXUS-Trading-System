@@ -89,6 +89,10 @@ class BacktestStatistics:
     tier_d_count: int = 0
     tier_d_pnl: float = 0.0
 
+    # v2.1 exit types (defaults for backward compatibility)
+    trailing_stop_exits: int = 0
+    breakeven_exits: int = 0
+
 
 class StatisticsCalculator:
     """Calculate backtest statistics."""
@@ -178,6 +182,8 @@ class StatisticsCalculator:
         # Exit analysis
         stop_exits = sum(1 for t in trades if t.exit_reason == ExitReason.STOP_LOSS)
         tp_exits = sum(1 for t in trades if t.exit_reason == ExitReason.TAKE_PROFIT)
+        trailing_exits = sum(1 for t in trades if t.exit_reason == ExitReason.TRAILING_STOP)
+        breakeven_exits = sum(1 for t in trades if t.exit_reason == ExitReason.BREAKEVEN_STOP)
         ind_exits = sum(1 for t in trades if t.exit_reason == ExitReason.INDICATOR_EXIT)
         time_exits = sum(
             1
@@ -242,6 +248,8 @@ class StatisticsCalculator:
             take_profit_exits=tp_exits,
             indicator_exits=ind_exits,
             time_expiry_exits=time_exits,
+            trailing_stop_exits=trailing_exits,
+            breakeven_exits=breakeven_exits,
             edge_type=edge_type,
             symbol=symbol,
             timeframe=timeframe,

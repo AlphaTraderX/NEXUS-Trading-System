@@ -407,7 +407,7 @@ class BacktestEngine:
         # Cooldown in bars between signals for a given setup
         self.SIGNAL_COOLDOWN_BARS = {
             EdgeType.VWAP_DEVIATION: 5,    # 5 days cooldown on daily bars
-            EdgeType.RSI_EXTREME: 5,   # RSI(2) trades last 3-7 days
+            EdgeType.RSI_EXTREME: 5,       # RSI(2) trades last 3-7 days
             EdgeType.BOLLINGER_TOUCH: 12,
             EdgeType.POWER_HOUR: 3,        # 3 day cooldown on daily bars
             EdgeType.ORB: 78,              # One per day (~78 5m bars)
@@ -417,6 +417,8 @@ class BacktestEngine:
             EdgeType.MONTH_END: 15,        # One signal per month-end window
             EdgeType.ASIAN_RANGE: 999,     # Effectively 1 per day
             EdgeType.OVERNIGHT_PREMIUM: 1, # 1 signal per day
+            EdgeType.INSIDER_CLUSTER: 3,   # Distinct events, 3-day cooldown
+            EdgeType.TURN_OF_MONTH: 20,    # One signal per month-boundary window
         }
 
     # ------------------------------------------------------------------

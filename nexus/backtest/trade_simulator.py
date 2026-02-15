@@ -49,9 +49,29 @@ def tier_multiplier(tier: str) -> float:
 class ExitReason(Enum):
     STOP_LOSS = "stop_loss"
     TAKE_PROFIT = "take_profit"
+    TRAILING_STOP = "trailing_stop"
+    BREAKEVEN_STOP = "breakeven_stop"
     INDICATOR_EXIT = "indicator_exit"
     TIME_EXPIRY = "time_expiry"
     END_OF_DATA = "end_of_data"
+
+
+@dataclass
+class TrailingStopConfig:
+    """Configuration for trailing stop + breakeven logic.
+
+    When passed to simulate_trade(), enables dynamic stop management:
+    - Breakeven: move stop to entry price once profit >= breakeven_atr_mult * ATR
+    - Trailing: trail stop at atr_trail_multiplier * ATR below (long) / above (short)
+      the best price seen, once profit >= trailing_activation_atr * ATR
+
+    ATR must be provided in the simulate_trade() call (atr parameter).
+    """
+
+    atr_trail_multiplier: float = 1.5    # Trail distance = ATR * this
+    breakeven_atr_mult: float = 1.0      # Move SL to entry after this * ATR profit
+    trailing_activation_atr: float = 1.5  # Start trailing after this * ATR profit
+    enabled: bool = True
 
 
 @dataclass
@@ -110,6 +130,8 @@ class TradeSimulator:
         signal_bar_idx: int,
         exit_checker: Optional[Callable[[pd.Series, bool], bool]] = None,
         risk_multiplier: float = 1.0,
+        trailing_config: Optional[TrailingStopConfig] = None,
+        atr: Optional[float] = None,
     ) -> Optional[SimulatedTrade]:
         """
         Simulate a single trade from an opportunity.
@@ -121,6 +143,8 @@ class TradeSimulator:
             exit_checker: Optional callback(bar, is_long) -> bool for
                 indicator-based exits.  Checked AFTER stop/target each bar.
             risk_multiplier: Score-based sizing multiplier (1.0 = baseline).
+            trailing_config: Optional trailing stop configuration (None = v1 behavior).
+            atr: Current ATR value (required if trailing_config is set).
 
         Returns:
             SimulatedTrade if trade could be executed, None otherwise
@@ -165,15 +189,37 @@ class TradeSimulator:
 
         last_possible = min(entry_bar_idx + self.max_hold_bars + 1, len(bars))
 
+        # Trailing stop state (only active when trailing_config is provided)
+        use_trailing = (
+            trailing_config is not None
+            and trailing_config.enabled
+            and atr is not None
+            and atr > 0
+        )
+        current_stop = opportunity.stop_loss
+        high_since_entry = entry_price
+        low_since_entry = entry_price
+        at_breakeven = False
+
         for i in range(entry_bar_idx + 1, last_possible):
             bar = bars.iloc[i]
             bar_time = bars.index[i]
 
+            # Update extreme prices for trailing logic
+            if use_trailing:
+                high_since_entry = max(high_since_entry, bar["high"])
+                low_since_entry = min(low_since_entry, bar["low"])
+
             if is_long:
                 # Check stop loss first (conservative: assume worst fills first)
-                if bar["low"] <= opportunity.stop_loss:
-                    exit_price = opportunity.stop_loss * (1 - self.slippage_pct / 100)
-                    exit_reason = ExitReason.STOP_LOSS
+                if bar["low"] <= current_stop:
+                    exit_price = current_stop * (1 - self.slippage_pct / 100)
+                    if use_trailing and at_breakeven:
+                        exit_reason = ExitReason.BREAKEVEN_STOP
+                    elif use_trailing and current_stop > opportunity.stop_loss:
+                        exit_reason = ExitReason.TRAILING_STOP
+                    else:
+                        exit_reason = ExitReason.STOP_LOSS
                     exit_time = bar_time
                     break
 
@@ -183,11 +229,31 @@ class TradeSimulator:
                     exit_reason = ExitReason.TAKE_PROFIT
                     exit_time = bar_time
                     break
+
+                # Update trailing stop (after checking this bar's exit)
+                if use_trailing:
+                    profit_distance = high_since_entry - entry_price
+                    # Breakeven: move stop to entry once profit >= breakeven threshold
+                    if (
+                        not at_breakeven
+                        and profit_distance >= trailing_config.breakeven_atr_mult * atr
+                    ):
+                        current_stop = max(current_stop, entry_price)
+                        at_breakeven = True
+                    # Trailing: once profit >= activation, trail at ATR distance from high
+                    if profit_distance >= trailing_config.trailing_activation_atr * atr:
+                        trail_stop = high_since_entry - trailing_config.atr_trail_multiplier * atr
+                        current_stop = max(current_stop, trail_stop)
             else:
                 # SHORT: stop if high >= stop
-                if bar["high"] >= opportunity.stop_loss:
-                    exit_price = opportunity.stop_loss * (1 + self.slippage_pct / 100)
-                    exit_reason = ExitReason.STOP_LOSS
+                if bar["high"] >= current_stop:
+                    exit_price = current_stop * (1 + self.slippage_pct / 100)
+                    if use_trailing and at_breakeven:
+                        exit_reason = ExitReason.BREAKEVEN_STOP
+                    elif use_trailing and current_stop < opportunity.stop_loss:
+                        exit_reason = ExitReason.TRAILING_STOP
+                    else:
+                        exit_reason = ExitReason.STOP_LOSS
                     exit_time = bar_time
                     break
 
@@ -197,6 +263,19 @@ class TradeSimulator:
                     exit_reason = ExitReason.TAKE_PROFIT
                     exit_time = bar_time
                     break
+
+                # Update trailing stop for short
+                if use_trailing:
+                    profit_distance = entry_price - low_since_entry
+                    if (
+                        not at_breakeven
+                        and profit_distance >= trailing_config.breakeven_atr_mult * atr
+                    ):
+                        current_stop = min(current_stop, entry_price)
+                        at_breakeven = True
+                    if profit_distance >= trailing_config.trailing_activation_atr * atr:
+                        trail_stop = low_since_entry + trailing_config.atr_trail_multiplier * atr
+                        current_stop = min(current_stop, trail_stop)
 
             # Indicator-based exit (checked at bar close, after stop/target)
             if exit_checker is not None and exit_checker(bar, is_long):

@@ -66,7 +66,7 @@ class RegimeConfig:
 REGIME_CONFIGS: Dict[GodModeRegime, RegimeConfig] = {
     GodModeRegime.STRONG_BULL: RegimeConfig(
         regime=GodModeRegime.STRONG_BULL,
-        position_size_multiplier=1.25,
+        position_size_multiplier=1.1,
         max_positions=12,
         allowed_edges=[
             EdgeType.TURN_OF_MONTH,
@@ -110,7 +110,7 @@ REGIME_CONFIGS: Dict[GodModeRegime, RegimeConfig] = {
     ),
     GodModeRegime.SIDEWAYS: RegimeConfig(
         regime=GodModeRegime.SIDEWAYS,
-        position_size_multiplier=0.9,
+        position_size_multiplier=1.0,
         max_positions=8,
         allowed_edges=[
             EdgeType.VWAP_DEVIATION,
@@ -121,6 +121,8 @@ REGIME_CONFIGS: Dict[GodModeRegime, RegimeConfig] = {
             EdgeType.LONDON_OPEN,
             EdgeType.TURN_OF_MONTH,
             EdgeType.MONTH_END,
+            EdgeType.INSIDER_CLUSTER,     # Works in all regimes at reduced size
+            EdgeType.OVERNIGHT_PREMIUM,   # Calendar-driven, regime-independent
         ],
         preferred_direction=None,
         stop_multiplier=0.8,
@@ -130,7 +132,7 @@ REGIME_CONFIGS: Dict[GodModeRegime, RegimeConfig] = {
     ),
     GodModeRegime.BEAR: RegimeConfig(
         regime=GodModeRegime.BEAR,
-        position_size_multiplier=0.75,
+        position_size_multiplier=0.9,
         max_positions=6,
         allowed_edges=[
             EdgeType.RSI_EXTREME,
@@ -138,6 +140,9 @@ REGIME_CONFIGS: Dict[GodModeRegime, RegimeConfig] = {
             EdgeType.BOLLINGER_TOUCH,
             EdgeType.GAP_FILL,
             EdgeType.TURN_OF_MONTH,
+            EdgeType.INSIDER_CLUSTER,     # Insider buying in bear = strong signal
+            EdgeType.OVERNIGHT_PREMIUM,   # Close-to-open, regime-independent
+            EdgeType.MONTH_END,
         ],
         preferred_direction=Direction.SHORT,
         stop_multiplier=1.2,
@@ -147,12 +152,14 @@ REGIME_CONFIGS: Dict[GodModeRegime, RegimeConfig] = {
     ),
     GodModeRegime.STRONG_BEAR: RegimeConfig(
         regime=GodModeRegime.STRONG_BEAR,
-        position_size_multiplier=0.5,
+        position_size_multiplier=0.85,
         max_positions=4,
         allowed_edges=[
             EdgeType.RSI_EXTREME,
             EdgeType.TURN_OF_MONTH,
             EdgeType.GAP_FILL,
+            EdgeType.INSIDER_CLUSTER,     # Insider buying in crash = high conviction
+            EdgeType.VWAP_DEVIATION,      # Oversold bounces
         ],
         preferred_direction=Direction.SHORT,
         stop_multiplier=1.5,
@@ -162,13 +169,16 @@ REGIME_CONFIGS: Dict[GodModeRegime, RegimeConfig] = {
     ),
     GodModeRegime.VOLATILE: RegimeConfig(
         regime=GodModeRegime.VOLATILE,
-        position_size_multiplier=0.6,
+        position_size_multiplier=0.85,
         max_positions=5,
         allowed_edges=[
             EdgeType.GAP_FILL,
             EdgeType.VWAP_DEVIATION,
             EdgeType.RSI_EXTREME,
             EdgeType.ORB,
+            EdgeType.INSIDER_CLUSTER,     # Insider buying in vol = contrarian signal
+            EdgeType.OVERNIGHT_PREMIUM,   # Close-to-open still works
+            EdgeType.TURN_OF_MONTH,       # Calendar edge, regime-independent
         ],
         preferred_direction=None,
         stop_multiplier=1.5,

@@ -136,6 +136,25 @@ class IGProvider(ReconnectionMixin, BaseBroker):
                         f"Could not switch to {self._desired_account_id}, "
                         f"staying on {self._account_id}"
                     )
+                    # The failed PUT may have invalidated our tokens.
+                    # Re-authenticate to get fresh CST/security tokens.
+                    reauth = await self._client.post(
+                        f"{self._base_url}/session",
+                        headers={
+                            "X-IG-API-KEY": self._api_key,
+                            "Content-Type": "application/json",
+                            "Accept": "application/json; charset=UTF-8",
+                            "Version": "2",
+                        },
+                        json={
+                            "identifier": self._username,
+                            "password": self._password,
+                        },
+                    )
+                    if reauth.status_code == 200:
+                        self._cst = reauth.headers.get("CST")
+                        self._security_token = reauth.headers.get("X-SECURITY-TOKEN")
+                        logger.info("Re-authenticated after failed account switch")
 
             self._connected = True
             logger.info(f"Connected to IG Markets (account: {self._account_id}, demo: {self._demo})")

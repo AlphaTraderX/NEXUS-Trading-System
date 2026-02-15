@@ -58,7 +58,7 @@ class TestRegimeConfigs:
         assert config.position_size_multiplier < 1.0
         assert config.max_positions <= 4
         assert config.max_heat < 20
-        assert len(config.allowed_edges) < 5
+        assert len(config.allowed_edges) <= 6
 
     def test_sideways_favors_mean_reversion(self):
         config = REGIME_CONFIGS[GodModeRegime.SIDEWAYS]
@@ -246,7 +246,7 @@ class TestRegimeAdaptation:
         bear_config = REGIME_CONFIGS[GodModeRegime.STRONG_BEAR]
         assert bear_config.max_positions <= 4
         assert bear_config.max_heat <= 20
-        assert bear_config.position_size_multiplier <= 0.5
+        assert bear_config.position_size_multiplier < 1.0
         assert bear_config.preferred_direction == Direction.SHORT
 
     def test_bull_favors_longs(self):
